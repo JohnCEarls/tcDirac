@@ -40,17 +40,25 @@ class SourceData:
         if sample_ids is None:
             #return all samples
             return df.loc[genes,:]
+        else:
+            return df.loc[genes,sample_ids]
+
+    def getPathways(self):
+        return self.net_info.getPathways()
             
 class MetaInfo:
     def __init__(self, meta_file):
         self.metadata = pandas.io.parsers.read_table(meta_file)
+        self.metadata.index = self.metadata['sample_id']
+        #for i in self.metadata.index:
+        #    assert( self.metadata['sample_id'][i] == i)
 
     def getSampleIDs(self, strain, allele=None):
         md = self.metadata
         if allele is None:
             return md[md['strain'] == strain]['sample_id'].tolist()
         else:
-            return md[(md['strain'] == strain) & (md['nominal_allele'] == allele)]['sample_id'].tolist()
+            return md[(md['strain'] == strain) & (md['allele_nominal'] == allele)]['sample_id'].tolist()
 
     def getStrains(self):
         return self.metadata['strain'].unique().tolist()
@@ -61,6 +69,9 @@ class MetaInfo:
             return md['allele_nominal'].unique().tolist()
         else:
             return md[md['strain'] == strain]['allele_nominal'].unique().tolist()
+
+    def getAge(self, sample_id):
+        return self.metadata['age'][sample_id]
 
 
 class NetworkInfo:
@@ -74,6 +85,7 @@ class NetworkInfo:
         #clean refers to the genes being filtered to match the genes
         #available in the expression file
         self.gene_clean = {}
+        self.pathways = []
 
     def getGenes(self, pathway_id, cache=True):
         if pathway_id not in self.gene_map:
@@ -84,6 +96,13 @@ class NetworkInfo:
             self.gene_map[pathway_id] = nit_item['gene_ids'][6:].split('~:~')
             self.gene_clean[pathway_id] = False
         return self.gene_map[pathway_id]
+
+    def getPathways(self):
+        if len(self.pathways) == 0:
+            pw_ids = self.table.query(src_id__eq=self.source_id, attributes=('pw_id',))
+            self.pathways = [pw['pw_id'] for pw in pw_ids]
+        return self.pathways
+        
 
     def isClean(self, pathway_id):
         return self.gene_clean[pathway_id]
@@ -115,4 +134,6 @@ if __name__ == "__main__":
     print p_exp"""
     mi = MetaInfo(meta_file)
     print mi.metadata
+    for sid in mi.getSampleIDs('FVB'):
+        print mi.getAge(sid)
 
