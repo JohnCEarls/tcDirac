@@ -15,9 +15,9 @@ import numpy as np
 
 def initLogging():
     comm = MPI.COMM_WORLD
-    configfile = "/scratch/sgeadmin/log_mpi_r%i.txt"%comm.Get_rank()
+    logfile = "/scratch/sgeadmin/log_mpi_r%i.txt"%comm.Get_rank()
     log_format = '%(asctime)s - %(name)s rank['+str( comm.Get_rank() )+']- %(levelname)s - %(message)s'
-    logging.basicConfig(filename=configfile, level=logging.INFO, format=log_format)
+    logging.basicConfig(filename=loggfile, level=logging.INFO, format=log_format)
 
 def getFiles():
     if comm.Get_rank() == 0:
@@ -86,24 +86,8 @@ def isHostBoss(comm):
     return True
 
 
-if __name__ == "__main__":
-    comm = MPI.COMM_WORLD
-   
-    initLogging()
+def genRMS(comm,sd,mi,k_neighbors):
 
-    logging.info('Process starting')
-
-    working_dir = '/scratch/sgeadmin/hddata/'
-    working_bucket = 'hd_working_0'
-    data_source_bucket = 'hd_source_data'
-
-    k_neighbors = 5
-
-    host_boss = False
-
-    makeDirs()
-    getFiles()
-    sd, mi = initData(comm)
     cstrain = None
     strain_id = -1 
     while True:
@@ -142,13 +126,15 @@ if __name__ == "__main__":
             srts = {}
             for allele in alleles:
                 srts[allele] = dirac.getSRT(sd.getExpression(pw,[s for a,s in samples[allele]]))
+
                 if debug.DEBUG:
                     r,c = srts[allele].shape
                     file_path = op.join(debug.debug_dir, '%s.%s.%s.%i.%i.srt' %(pw,cstrain,allele,r,c))
                     srts[allele].to_csv(file_path + '.csv')
             
-            if debug.DEBUG and False:
+            if debug.DEBUG:
                 centers = []
+
             for allele_base in alleles:
                 for allele_compare in alleles:
                     r_index = "%s_%s" % (pw,allele_compare)
@@ -162,13 +148,15 @@ if __name__ == "__main__":
                         if u >= len(samples[allele_compare]):
                             l = l - (u - (len(samples[allele_compare]) - 1))
                             u = len(samples[allele_compare]) - 1
-                        if debug.DEBUG and False:
+                        if debug.DEBUG:
                             centers.append((allele_compare,allele_base,l,i,u))
 
                         samp_compare = [s for a,s in samples[allele_compare][l:u+1]]
-                        if debug.DEBUG and False:
+
+                        if debug.DEBUG:
                             t = [samp] + samp_compare[:]
                             centers.append(tuple(t))
+
                         comp_exp = srts[allele_compare].loc[:,samp_compare]
                         rt = dirac.getRT(comp_exp)
                     
@@ -180,7 +168,8 @@ if __name__ == "__main__":
                             rt.to_csv(file_path)
                             
                         results[samp][r_index] =  dirac.getRMS(srts[allele_base][samp],rt)
-            if debug.DEBUG and False:
+
+            if debug.DEBUG:
                 file_path = op.join(debug.debug_dir, '%s.centers.csv' %(pw,))
                 with open(file_path, 'w') as df:
                     out = '\n'.join(map(str,centers))
@@ -188,6 +177,27 @@ if __name__ == "__main__":
 
 
         comm.barrier()
-        results.to_pickle(op.join(working_dir, 'rms.%s.%i.pandas'%(cstrain, comm.Get_rank()))) 
+        if debug.DEBUG:
+            results.to_pickle(op.join(working_dir, 'rms.%s.%i.pandas'%(cstrain, comm.Get_rank()))) 
+        return results
+
+if __name__ == "__main__":
+    comm = MPI.COMM_WORLD
+   
+    initLogging()
+
+    logging.info('Process starting')
+
+    working_dir = '/scratch/sgeadmin/hddata/'
+    working_bucket = 'hd_working_0'
+    data_source_bucket = 'hd_source_data'
+
+    k_neighbors = 5
+
+    host_boss = False
+
+    makeDirs()
+    getFiles()
+    sd, mi = initData(comm)
 
     logging.info('Process ending')
