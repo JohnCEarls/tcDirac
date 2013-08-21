@@ -43,12 +43,13 @@ def makeDirs(dirs):
             if not op.exists(d):
                 os.makedirs(d)
     comm.barrier()
-
+"""
 def checkDebug():
     if debug.DEBUG:
         logging.info('***DEBUG ON***')
         makeDirs([debug.debug_dir])        
-
+"""
+"""
 def initData(comm):
     sd = data.SourceData()
     mi = None
@@ -65,7 +66,8 @@ def initData(comm):
     logging.info("Received SourceData and MetaInfo")
 
     return sd, mi
-
+"""
+"""
 def isHostBoss(comm):
     """
     Host Boss is the smallest rank on a given host
@@ -81,7 +83,7 @@ def isHostBoss(comm):
         if host == myh and rank < myr:
             return False
     return True
-
+"""
 
 def kNearest(compare_list,samp_name, samp_age, k):
     """
@@ -144,7 +146,8 @@ def genRMS(comm,sd,mi,k_neighbors):
         alleles = mi.getNominalAlleles(cstrain)
         indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(mypws,alleles)]
         samples = mi.getSampleIDs(cstrain)
-        
+
+        #preallocate results dataframe 
         results = pandas.DataFrame(np.empty((len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
         for pw in mypws:
             #partition samples by strain/allele
