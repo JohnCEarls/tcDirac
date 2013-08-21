@@ -34,23 +34,20 @@ def getFiles():
             k.key ='trimmed_dataframe.pandas'
             k.get_content_to_filename(op.join( working_dir,'trimmed_dataframe.pandas'))
 
-def makeDirs():
+def makeDirs(dirs):
     comm = MPI.COMM_WORLD
     if isHostBoss(comm):
-        #print socket.gethostname(),comm.Get_rank(), "loves it when you call it big papa"
         logging.info('Boss of %s'%socket.gethostname())
-        host_boss = True
-        if not op.exists(working_dir):
-            os.makedirs(working_dir)
-        checkDebug()
+        for d in dirs:
+            host_boss = True
+            if not op.exists(d):
+                os.makedirs(d)
+    comm.barrier()
 
 def checkDebug():
     if debug.DEBUG:
-        if not op.exists(debug.debug_dir):
-            try:
-                os.makedirs(debug.debug_dir)
-            except:
-                logging.warning('Unable to create [%s], probably made by other mpi process' % debug.debug_dir)
+        logging.info('***DEBUG ON***')
+        makeDirs([debug.debug_dir])        
 
 def initData(comm):
     sd = data.SourceData()
@@ -86,26 +83,63 @@ def isHostBoss(comm):
     return True
 
 
+def kNearest(compare_list,samp_name, samp_age, k):
+    """
+    Given compare_list, which contains tuples in sorted order
+        of (sample_age, sample_name).
+    returns k sample names that are closest in age to samp_age
+    """
+    off = k/2
+    i = bisect.bisect_left(compare_list,(age,samp) )
+    l = i - off
+    u = i + off
+    if l < 0:
+        u = u - l
+        l = 0
+    if u >= len(compare_list):
+        l = l - (u - (len(compare_list) - 1))
+        u = len(compare_list) - 1
+
+    samp_compare = [s for a,s in compare_list[l:u+1]]
+    return samp_compare
+
+def partitionSamplesByAllele( alleles, mi, cstrain):
+    """
+    Get a dictionary of lists of sample names and ages partitioned by allele in increasing
+        age order.
+    Given alleles(list of strings), mi(metadataInfo object), cstrain (string: current strain)
+    returns dict[allele] -> list:[(age_1,samp_name_1), ... ,(age_n,samp_name_n)] sorted by age
+    """
+    samples = {}
+    for allele in alleles:
+        samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
+        samples[allele].sort()
+    return samples
+def getSRTSByAllele(alleles,pw,samples):
+    """
+    Returns a dict containing sample rank templates for each alleles given the pathway(pw)
+    """
+    srts = {}
+    for allele in alleles:
+        srts[allele] = dirac.getSRT(sd.getExpression(pw,[s for a,s in samples[allele]]))
+    return srts
+
 def genRMS(comm,sd,mi,k_neighbors):
+   
+    #get and distribute pws and strains 
+    pws = None
+    if comm.rank == 0:
+        pws = sd.getPathways()
+        strain_list = mi.getStrains()
 
-    cstrain = None
-    strain_id = -1 
-    while True:
-        if comm.rank == 0:
-            strain_list = mi.getStrains()
-            strain_id += 1
-            if strain_id < len(strain_list):
-                cstrain = strain_list[strain_id]
-            else:
-                cstrain = 'STOP'    
+    pws = comm.bcast(pws)
+    strain_list = comm.bcast(strain_list)
 
-        cstrain = comm.bcast(cstrain)
-        if cstrain == 'STOP':
-            logging.info("Received STOP command")
-            break
+    
+    for cstrain in strain_list:
 
         logging.info('Starting strain [%s]' % cstrain)
-        pws = sd.getPathways()
+        
         mypws = [pw for i,pw in enumerate(pws) if i%comm.size == comm.rank]
         alleles = mi.getNominalAlleles(cstrain)
         indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(mypws,alleles)]
@@ -113,72 +147,26 @@ def genRMS(comm,sd,mi,k_neighbors):
         
         results = pandas.DataFrame(np.empty((len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
         for pw in mypws:
-            samples = {}
-            for allele in alleles:
-                samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
-                samples[allele].sort()
-                if debug.DEBUG:
-                    md = mi.metadata
-                    for s in samples[allele]:
-                        assert(md['allele_nominal'][s[1]] == allele)
+            #partition samples by strain/allele
+            samples = partitionSamplesByAllele( alleles, mi, cstrain)
 
-            off = k_neighbors/2
-            srts = {}
-            for allele in alleles:
-                srts[allele] = dirac.getSRT(sd.getExpression(pw,[s for a,s in samples[allele]]))
-
-                if debug.DEBUG:
-                    r,c = srts[allele].shape
-                    file_path = op.join(debug.debug_dir, '%s.%s.%s.%i.%i.srt' %(pw,cstrain,allele,r,c))
-                    srts[allele].to_csv(file_path + '.csv')
-            
-            if debug.DEBUG:
-                centers = []
+            #generate pw srts for all samples partitioned by strain/allele
+            srts = getSRTSByAllele(alleles,pw,samples)
 
             for allele_base in alleles:
                 for allele_compare in alleles:
                     r_index = "%s_%s" % (pw,allele_compare)
+                    #list of samples with comparison allele
+                    compare_list = samples[allele_compare]
                     for age, samp in samples[allele_base]:
-                        i = bisect.bisect_left(samples[allele_compare],(age,samp) )
-                        l = i - off
-                        u = i + off
-                        if l < 0:
-                            u = u - l
-                            l = 0
-                        if u >= len(samples[allele_compare]):
-                            l = l - (u - (len(samples[allele_compare]) - 1))
-                            u = len(samples[allele_compare]) - 1
-                        if debug.DEBUG:
-                            centers.append((allele_compare,allele_base,l,i,u))
 
-                        samp_compare = [s for a,s in samples[allele_compare][l:u+1]]
-
-                        if debug.DEBUG:
-                            t = [samp] + samp_compare[:]
-                            centers.append(tuple(t))
+                        samp_compare = kNearest(compare_list,samp_name, samp_age, k_neighbors)
 
                         comp_exp = srts[allele_compare].loc[:,samp_compare]
                         rt = dirac.getRT(comp_exp)
-                    
-                        if debug.DEBUG:
-                            r,c = comp_exp.shape
-                            file_path = op.join(debug.debug_dir,r_index+"_"+allele_base+"_"+samp+".srt4rt.csv")
-                            comp_exp.to_csv(file_path)
-                            file_path = op.join(debug.debug_dir,r_index+"_"+allele_base+"_"+samp+".rt.csv")
-                            rt.to_csv(file_path)
-                            
                         results[samp][r_index] =  dirac.getRMS(srts[allele_base][samp],rt)
 
-            if debug.DEBUG:
-                file_path = op.join(debug.debug_dir, '%s.centers.csv' %(pw,))
-                with open(file_path, 'w') as df:
-                    out = '\n'.join(map(str,centers))
-                    df.write(out)
-
-
         comm.barrier()
-        if debug.DEBUG:
-            results.to_pickle(op.join(working_dir, 'rms.%s.%i.pandas'%(cstrain, comm.Get_rank()))) 
         return results
 
 if __name__ == "__main__":
@@ -196,7 +184,7 @@ if __name__ == "__main__":
 
     host_boss = False
 
-    makeDirs()
+    makeDirs([working_dir])
     getFiles()
     sd, mi = initData(comm)
 
