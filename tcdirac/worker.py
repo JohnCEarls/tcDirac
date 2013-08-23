@@ -18,7 +18,7 @@ class Worker:
         self._working_bucket = working_bucket
         logging.info("Initial settings: working_dir[%s], working bucket [%s], datasource bucket [%s]" 
             % (working_dir, working_bucket, ds_bucket))
-
+        self._nominal_alleles = {}
         self._sd = None #data.SourceData object
         self._mi = None #data.MetaInfo
         self._host_master = self._host_comm.rank == 0
@@ -165,7 +165,9 @@ class Worker:
         return samp_compare
 
     def _getAlleles(self, cstrain):
-        return self._mi.getNominalAlleles(cstrain)
+        if cstrain not in self._nominal_alleles:
+            self._nominal_alleles[cstrain] = self._mi.getNominalAlleles(cstrain)
+        return self._nominal_alleles[cstrain]
 
     def _getStrains(self, comm=None, strain_master=0):
         strains = None
@@ -199,10 +201,12 @@ class Worker:
 
         return [pw for i,pw in enumerate(pathways) if i%comm.size == comm.rank]
 
-    def initResultsDataFrame(self,comm=None):
+    def initRMSDFrame(self,my_pathways, cstrain):
         if comm==None:
            comm = self._comm
-        #TODO
+        alleles = self._getAlleles(cstrain)
+        indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(my_pathways, alleles)]
+        return pandas.DataFrame(np.empty( len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
 
 
     def _partitionSamplesByAllele(self, alleles, cstrain):
@@ -221,5 +225,17 @@ class Worker:
         self._sample_x_allele = samples 
 
 
+if __name__ == "__main__":
+    world_comm = MPI.COMM_WORLD
+
+    worker_settings = {
+                'comm':MPI.COMM_WORLD, 
+                'working_dir':'/scratch/sgeadmin/hddata/', 
+                'working_bucket':'hd_working_0', 
+                'ds_bucket':'hd_source_data', 
+                'logging_level':logging.INFO
+                }
+
+    wkr = Worker(**worker_settings)     
     
 
