@@ -35,6 +35,7 @@ class Worker:
         self._nominal_alleles = {}
         self._sd = None #data.SourceData object
         self._mi = None #data.MetaInfo
+        self._results = {}
 
         self._pathways = None
         self._initData()
@@ -179,7 +180,7 @@ class Worker:
         samp_compare = [s for a,s in compare_list[l:u+1]]
         return samp_compare
 
-    def _getAlleles(self, cstrain):
+    def getAlleles(self, cstrain):
         if cstrain not in self._nominal_alleles:
             self._nominal_alleles[cstrain] = self._mi.getNominalAlleles(cstrain)
         return self._nominal_alleles[cstrain]
@@ -215,12 +216,15 @@ class Worker:
             comm = self._comm 
         if self._pathways is None:
             pathways = self._pathways = self._getPathways( comm )
+        else:
+            pathways = self._pathways
         return [pw for i,pw in enumerate(pathways) if i%comm.size == comm.rank]
 
-    def initRMSDFrame(self,my_pathways, cstrain):
+    def initRMSDFrame(self,my_pathways, cstrain, comm=None):
         if comm==None:
            comm = self._comm
-        alleles = self._getAlleles(cstrain)
+        alleles = self.getAlleles(cstrain)
+        samples = self._getSamplesByStrain(cstrain)
         indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(my_pathways, alleles)]
         return pandas.DataFrame(np.empty(( len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
 
@@ -235,16 +239,15 @@ class Worker:
         mi = self._mi
 
         samples = {}
-        for allele in self._getAlleles(cstrain):
+        for allele in self.getAlleles(cstrain):
             samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
             samples[allele].sort()
         self._sample_x_allele = samples 
 
     def initStrain(self, cstrain, mypws):
         self._cstrain = cstrain
-        self._results = {}
-        self._partitionSamplesByAlleles(cstrain)
-        self._results[cstrain] = self.initRMSD( mypws, cstrain )
+        self._partitionSamplesByAllele(cstrain)
+        self._results[cstrain] = self.initRMSDFrame( mypws, cstrain )
 
     def getSamplesByAllele(self, cstrain, allele):
         assert( cstrain == self._cstrain )
@@ -260,12 +263,16 @@ class Worker:
             srts[allele] = dirac.getSRT( expFrame )
         return srts
 
-    def getRMS(self, rt, samp, allele_base):
-        return dirac.getRMS( self._sample_x_allele[allele_base][samp], rt )
+    def getRMS(self, rt, srt):
+        return dirac.getRMS( srt, rt )
 
     def setRMS(self, rms, index, samp):
         self._results[self._cstrain][samp][index] = rms
 
+    def saveRMS(self,prefix='rms'):
+        for strain, table in self._results.iteritems():
+            ofile_name = '%s.%s.%i.pandas.pkl' % (prefix,strain,self._comm.rank)
+            table.to_pickle(op.join(self._working_dir,ofile_name))
 
 if __name__ == "__main__":
     world_comm = MPI.COMM_WORLD
@@ -279,26 +286,27 @@ if __name__ == "__main__":
                 }
     k_neighbors = 5
 
-    a dictionary to hold the result dataframes, keyed by strain
+    #a dictionary to hold the result dataframes, keyed by strain
     results = {}
 
     wkr = Worker(**worker_settings)     
     for cstrain in wkr.getStrains():
         logging.info("Strain[%s] starting" % cstrain)
 
-        mypws = self.getMyPathways()
+        mypws = wkr.getMyPathways()
         alleles = wkr.getAlleles(cstrain)
         wkr.initStrain(cstrain, mypws)
         for pw in mypws:
-            srts = wkr.getSRTs( cstrain, pw )
+            srts = wkr.genSRTs( cstrain, pw )
             for a_base, a_compare in itertools.product(alleles,alleles):
                 r_index = "%s_%s" % (pw, a_compare)
                 base_samp = wkr.getSamplesByAllele(cstrain, a_base)
                 comp_samp = wkr.getSamplesByAllele(cstrain,a_compare)
                 for age, samp in base_samp:
                     neighbors = wkr.kNearest(comp_samp, samp, age, k_neighbors)
-                    srt_comp = srts[a_compare].loc[:,comp_samp]
+                    srt_comp = srts[a_compare].loc[:,neighbors]
                     rt = dirac.getRT(srt_comp) 
-                    rms = wkr.getRMS( rt, samp, a_base) 
+                    samp_srt = srts[a_base][samp]
+                    rms = wkr.getRMS( rt, samp_srt ) 
                     wkr.setRMS(rms, r_index, samp)
-        
+    wkr.saveRMS()        
