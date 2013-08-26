@@ -99,8 +99,11 @@ class NetworkInfo:
 
     def getPathways(self):
         if len(self.pathways) == 0:
-            pw_ids = self.table.query(src_id__eq=self.source_id, attributes=('pw_id',))
-            self.pathways = [pw['pw_id'] for pw in pw_ids]
+            pw_ids = self.table.query(src_id__eq=self.source_id, attributes=('pw_id','gene_ids'))
+            #simple load balancing
+            t = [(len(pw['gene_ids'].split('~:~')), pw['pw_id']) for pw in pw_ids]
+            t.sort()
+            self.pathways = [pw for l,pw in t]             
         return self.pathways
         
 
