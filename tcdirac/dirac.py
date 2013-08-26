@@ -18,17 +18,20 @@ def getSRT( df ):
 
     genes = df.index
     srt_rows = scipy.misc.comb(len(genes),2,exact=True)#num rows in new df
-
+    index = ["%s < %s" % (g1,g2) for g1, g2 in  ic(genes,2)]
     #make empty dataframe
-    srt = DataFrame(np.empty((srt_rows,len(df.columns)),dtype=int),
+    srt = DataFrame(np.zeros((srt_rows,len(df.columns)),dtype=int),
             columns=df.columns, 
-            index = ["%s < %s" % (g1,g2) for g1, g2 in  ic(genes,2)])
+            index=index)
 
     #this should be gpu
     for sample in df.columns:
         c = df[sample]
+        idx = 0
         for g1,g2 in ic(genes,2):
-            srt[sample]["%s < %s" % (g1,g2)] = 1 if c[g1] < c[g2]  else 0
+            if c[g1] < c[g2]:
+                srt[sample][index[idx]] = 1
+            idx += 1
     return srt       
 
 def getRT( df ):
@@ -38,8 +41,10 @@ def getRT( df ):
     
     """
     nsamps = df.shape[1]
+
     if debug.DEBUG:
         assert(nsamps == len(df.columns))
+    
     return df.sum(1).apply(lambda x: 0 if 2*x < nsamps else 1)   
 
 def getRMS( srts, rt):
