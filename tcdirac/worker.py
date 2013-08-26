@@ -12,6 +12,9 @@ import bisect
 import itertools
 import pandas
 import numpy as np
+import time
+from profiler import MPIProfiler
+
 
 class Worker:
     """
@@ -19,7 +22,11 @@ class Worker:
     """
     def __init__(self, comm, working_dir, working_bucket, ds_bucket, logging_level=logging.INFO):
         self._comm = comm
-
+        p=self.p = MPIProfiler()
+        p.addMeta('rank', comm.rank)
+        p.addMeta('size', comm.size)
+        p.start("Worker")
+        p.start("__init__()")
         #create a communicators specific to each host
         self._host_comm, self._host_map = self._hostConfig()
 
@@ -38,10 +45,11 @@ class Worker:
         self._results = {}
 
         self._pathways = None
+        p.start("_initData()")
         self._initData()
+        p.end("_initData()")
+        p.end("__init__()")
 
-
-        
     def _initLogging(self, level=logging.INFO):
         """
         Initialize logging
@@ -51,17 +59,20 @@ class Worker:
         log_format = '%(asctime)s - %(name)s rank['+str( comm.Get_rank() )+']- %(levelname)s - %(message)s'
         logging.basicConfig(filename=logfile, level=level, format=log_format)
 
-
     def _initData(self, data_master=0):
         """
         Parses data (sourcedata and metainfo) and distributes it to all nodes in comm
         """
         comm = self._comm
 
-    
+        p = self.p
+        p.start("makeDirs()")
         self.makeDirs([self._working_dir])
+        p.end("makeDirs()")
+        p.start("getDataFiles()")
         self._getDataFiles(data_master)
-
+        p.end("getDataFiles()")
+        p.start("Make DataObjects")
         sd = data.SourceData()
         mi = None
         if comm.rank == data_master:
@@ -70,9 +81,12 @@ class Worker:
             sd.load_net_info()
             logging.info('init MetaInfo')
             mi = data.MetaInfo(op.join(self._working_dir,'metadata.txt'))
+        p.end("Make DataObjects")
         logging.info("Broadcasting SourceData and MetaInfo")
+        p.start("Transmit DataObjects")
         sd = comm.bcast(sd)
         mi = comm.bcast(mi)
+        p.end("Transmit DataObjects")
         logging.info("Received SourceData and MetaInfo")
      
         self._sd = sd
@@ -101,7 +115,6 @@ class Worker:
                 k.key ='trimmed_dataframe.pandas'
                 k.get_content_to_filename(op.join( working_dir,'trimmed_dataframe.pandas'))
         comm.barrier()
-
 
     def _hostConfig(self):
         """
@@ -186,14 +199,7 @@ class Worker:
         return self._nominal_alleles[cstrain]
 
     def getStrains(self, comm=None, strain_master=0):
-        strains = None
-        if comm is None:
-            comm = self._comm
-        if comm.rank == strain_master:
-            strains = self._mi.getStrains()
-        #making sure everyone is on the same page
-        return comm.bcast(strains, root=strain_master)
-        
+        return self._mi.getStrains()
  
     def _getPathways(self, comm=None, pathway_master=0):
         pws = None
@@ -274,6 +280,36 @@ class Worker:
             ofile_name = '%s.%s.%i.pandas.pkl' % (prefix,strain,self._comm.rank)
             table.to_pickle(op.join(self._working_dir,ofile_name))
 
+    def classify( self, comm=None ):
+        
+        if comm is None:
+            comm = self._comm
+        class_dict = {}
+        self.p.start("getStrains (classify)")
+        st = self.getStrains()
+        self.p.end("getStrains (classify)")
+        for strain in st: #self.getStrains():
+            self.p.start('gmp[%s]'%strain)
+            mypws = self.getMyPathways(comm)
+            self.p.end('gmp[%s]'%strain)
+            res = self._results[strain]
+            class_dict[strain] = pandas.DataFrame(np.empty(( len(mypws), len(res.columns)), dtype=int) , index=mypws, columns = res.columns )
+            self.p.start('mypw classify loop[%s]'%strain)
+            for pw in mypws:
+                alleles = self.getAlleles(strain)
+                for b_allele in alleles:
+                    samps = [s for s in self._mi.getSampleIDs(strain, b_allele)]
+                    b_rows = ["%s_%s" %(pw,allele) for allele in alleles if allele != b_allele]
+                    
+                    for samp in samps:
+                        class_dict[strain][samp][pw] = 1
+                        for row in b_rows:
+                            if res.loc[row,samp] >= res.loc["%s_%s" % (pw, b_allele), samp]:
+                                class_dict[strain][samp][pw] = 0
+            self.p.end('mypw classify loop[%s]'%strain)
+        self._classification_res = class_dict
+        return class_dict
+        
 if __name__ == "__main__":
     world_comm = MPI.COMM_WORLD
 
@@ -282,20 +318,23 @@ if __name__ == "__main__":
                 'working_dir':'/scratch/sgeadmin/hddata/', 
                 'working_bucket':'hd_working_0', 
                 'ds_bucket':'hd_source_data', 
-                'logging_level':logging.INFO
+                'logging_level':logging.CRITICAL
                 }
     k_neighbors = 5
 
     #a dictionary to hold the result dataframes, keyed by strain
     results = {}
 
-    wkr = Worker(**worker_settings)     
+    wkr = Worker(**worker_settings) 
+    wkr.p.start("Creating RMS")    
     for cstrain in wkr.getStrains():
         logging.info("Strain[%s] starting" % cstrain)
 
         mypws = wkr.getMyPathways()
         alleles = wkr.getAlleles(cstrain)
+        wkr.p.start("initStrain(%s,%s)"%(cstrain, mypws[0]))
         wkr.initStrain(cstrain, mypws)
+        wkr.p.end("initStrain(%s,%s)"%(cstrain, mypws[0]))
         for pw in mypws:
             srts = wkr.genSRTs( cstrain, pw )
             for a_base, a_compare in itertools.product(alleles,alleles):
@@ -309,4 +348,15 @@ if __name__ == "__main__":
                     samp_srt = srts[a_base][samp]
                     rms = wkr.getRMS( rt, samp_srt ) 
                     wkr.setRMS(rms, r_index, samp)
-    wkr.saveRMS()        
+        
+    wkr.p.end("Creating RMS")    
+    #wkr.saveRMS()
+    wkr.p.start("Classifying")        
+    c = wkr.classify()
+    wkr.p.end("Classifying")        
+    wkr.p.printLog(ranks=[0,1])
+    """
+    for strain in c.keys():
+        ofile_name = '%s.%s.%i.pandas.pkl' % ('classify',strain,wkr._comm.rank) 
+        c[strain].to_pickle(op.join(wkr._working_dir,ofile_name))"""
+
