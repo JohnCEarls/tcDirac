@@ -260,6 +260,7 @@ class Worker:
         return self._sample_x_allele[allele]
 
     def genSRTs(self, cstrain, pw):
+        self.p.start("genSRTs[%s]" % cstrain)
         srts = {}
         sd = self._sd
         mi = self._mi
@@ -267,6 +268,7 @@ class Worker:
             samples = [s for a,s in self._sample_x_allele[allele]]
             expFrame = sd.getExpression( pw, samples)
             srts[allele] = dirac.getSRT( expFrame )
+        self.p.end("genSRTs[%s]" % cstrain)
         return srts
 
     def getRMS(self, rt, srt):
@@ -285,16 +287,10 @@ class Worker:
         if comm is None:
             comm = self._comm
         class_dict = {}
-        self.p.start("getStrains (classify)")
-        st = self.getStrains()
-        self.p.end("getStrains (classify)")
-        for strain in st: #self.getStrains():
-            self.p.start('gmp[%s]'%strain)
+        for strain in self.getStrains():
             mypws = self.getMyPathways(comm)
-            self.p.end('gmp[%s]'%strain)
             res = self._results[strain]
             class_dict[strain] = pandas.DataFrame(np.empty(( len(mypws), len(res.columns)), dtype=int) , index=mypws, columns = res.columns )
-            self.p.start('mypw classify loop[%s]'%strain)
             for pw in mypws:
                 alleles = self.getAlleles(strain)
                 for b_allele in alleles:
@@ -306,7 +302,6 @@ class Worker:
                         for row in b_rows:
                             if res.loc[row,samp] >= res.loc["%s_%s" % (pw, b_allele), samp]:
                                 class_dict[strain][samp][pw] = 0
-            self.p.end('mypw classify loop[%s]'%strain)
         self._classification_res = class_dict
         return class_dict
         
@@ -329,14 +324,17 @@ if __name__ == "__main__":
     wkr.p.start("Creating RMS")    
     for cstrain in wkr.getStrains():
         logging.info("Strain[%s] starting" % cstrain)
-
+        wkr.p.start("getMyPways[%s]" % cstrain)
         mypws = wkr.getMyPathways()
+        wkr.p.end("getMyPways[%s]" % cstrain)
         alleles = wkr.getAlleles(cstrain)
         wkr.p.start("initStrain(%s,%s)"%(cstrain, mypws[0]))
         wkr.initStrain(cstrain, mypws)
         wkr.p.end("initStrain(%s,%s)"%(cstrain, mypws[0]))
+        wkr.p.start("looping pws[%s]" % cstrain)
         for pw in mypws:
             srts = wkr.genSRTs( cstrain, pw )
+            wkr.p.start("looping minus SRT[%s]"%cstrain)
             for a_base, a_compare in itertools.product(alleles,alleles):
                 r_index = "%s_%s" % (pw, a_compare)
                 base_samp = wkr.getSamplesByAllele(cstrain, a_base)
@@ -349,6 +347,8 @@ if __name__ == "__main__":
                     rms = wkr.getRMS( rt, samp_srt ) 
                     wkr.setRMS(rms, r_index, samp)
         
+            wkr.p.end("looping minus SRT[%s]"%cstrain)
+        wkr.p.end("looping pws[%s]" % cstrain)
     wkr.p.end("Creating RMS")    
     #wkr.saveRMS()
     wkr.p.start("Classifying")        

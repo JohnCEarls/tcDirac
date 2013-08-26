@@ -12,7 +12,7 @@ import bisect
 import itertools
 import pandas
 import numpy as np
-
+"""
 def initLogging():
     comm = MPI.COMM_WORLD
     logfile = "/scratch/sgeadmin/log_mpi_r%i.txt"%comm.Get_rank()
@@ -43,13 +43,11 @@ def makeDirs(dirs):
             if not op.exists(d):
                 os.makedirs(d)
     comm.barrier()
-"""
+
 def checkDebug():
     if debug.DEBUG:
         logging.info('***DEBUG ON***')
         makeDirs([debug.debug_dir])        
-"""
-"""
 def initData(comm):
     sd = data.SourceData()
     mi = None
@@ -66,13 +64,11 @@ def initData(comm):
     logging.info("Received SourceData and MetaInfo")
 
     return sd, mi
-"""
-"""
 def isHostBoss(comm):
-    """
+    ""
     Host Boss is the smallest rank on a given host
     This is meant to figure out who does io.
-    """
+   ""
     myh = socket.gethostname()
     myr = comm.Get_rank()
    
@@ -117,6 +113,7 @@ def partitionSamplesByAllele( alleles, mi, cstrain):
         samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
         samples[allele].sort()
     return samples
+
 def getSRTSByAllele(alleles,pw,samples):
     """
     Returns a dict containing sample rank templates for each alleles given the pathway(pw)
