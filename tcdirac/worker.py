@@ -14,19 +14,16 @@ import pandas
 import numpy as np
 import time
 from profiler import MPIProfiler
-
-
+import random
+from boto.s3.key import Key
+import boto
+import copy
 class Worker:
     """
     tcdirac worker class
     """
     def __init__(self, comm, working_dir, working_bucket, ds_bucket, logging_level=logging.INFO):
         self._comm = comm
-        p=self.p = MPIProfiler()
-        p.addMeta('rank', comm.rank)
-        p.addMeta('size', comm.size)
-        p.start("Worker")
-        p.start("__init__()")
         #create a communicators specific to each host
         self._host_comm, self._host_map = self._hostConfig()
 
@@ -43,12 +40,10 @@ class Worker:
         self._sd = None #data.SourceData object
         self._mi = None #data.MetaInfo
         self._results = {}
-
+        self._srt_cache = {}
+        self._sample_x_allele = {}
         self._pathways = None
-        p.start("_initData()")
         self._initData()
-        p.end("_initData()")
-        p.end("__init__()")
 
     def _initLogging(self, level=logging.INFO):
         """
@@ -65,14 +60,8 @@ class Worker:
         """
         comm = self._comm
 
-        p = self.p
-        p.start("makeDirs()")
         self.makeDirs([self._working_dir])
-        p.end("makeDirs()")
-        p.start("getDataFiles()")
         self._getDataFiles(data_master)
-        p.end("getDataFiles()")
-        p.start("Make DataObjects")
         sd = data.SourceData()
         mi = None
         if comm.rank == data_master:
@@ -81,12 +70,9 @@ class Worker:
             sd.load_net_info()
             logging.info('init MetaInfo')
             mi = data.MetaInfo(op.join(self._working_dir,'metadata.txt'))
-        p.end("Make DataObjects")
         logging.info("Broadcasting SourceData and MetaInfo")
-        p.start("Transmit DataObjects")
         sd = comm.bcast(sd)
         mi = comm.bcast(mi)
-        p.end("Transmit DataObjects")
         logging.info("Received SourceData and MetaInfo")
      
         self._sd = sd
@@ -100,20 +86,22 @@ class Worker:
         comm = self._comm
         working_dir = self._working_dir
         data_source_bucket = self._datasource_bucket
-
+       
         if comm.rank == file_master:
             if not op.exists(op.join( working_dir,'metadata.txt')):
                 conn = boto.connect_s3()
                 b = conn.get_bucket(data_source_bucket)
+                k = Key(b)
                 k.key = 'metadata.txt'
-                k.get_content_to_filename(op.join( working_dir,'metadata.txt'))
+                k.get_contents_to_filename(op.join( working_dir,'metadata.txt'))
 
         if comm.rank == file_master:
             if not op.exists(op.join( working_dir, 'trimmed_dataframe.pandas')):
                 conn = boto.connect_s3()
-                b = conn.get_bucket(data_source_bucket)
+                b = conn.get_bucket(self._working_bucket)
+                k = Key(b)
                 k.key ='trimmed_dataframe.pandas'
-                k.get_content_to_filename(op.join( working_dir,'trimmed_dataframe.pandas'))
+                k.get_contents_to_filename(op.join( working_dir,'trimmed_dataframe.pandas'))
         comm.barrier()
 
     def _hostConfig(self):
@@ -179,8 +167,13 @@ class Worker:
             of (sample_age, sample_name).
         returns k sample names that are closest in age to samp_age
         """
+        compare_list = [(a,n) for a,n in compare_list if (a,n) != (samp_age,samp_name)]
+        while k > len(compare_list):
+            logging.warning("k is too large [%i], adjusting to [%i]"%(k,k-1))
+            k -= 1
+
         off = k/2
-        i = bisect.bisect_left(compare_list,(age,samp) )
+        i = bisect.bisect_left(compare_list,(samp_age,samp_name) )
         l = i - off
         u = i + off
         if l < 0:
@@ -208,7 +201,7 @@ class Worker:
         if comm.rank == pathway_master:
             pws = self._sd.getPathways()
             #dbase hit, so limit conns
-            pws.sort()
+            #pws.sort()
         return comm.bcast(pws, root=pathway_master)
 
     def _getSamplesByStrain(self, strain):
@@ -235,7 +228,7 @@ class Worker:
         return pandas.DataFrame(np.empty(( len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
 
 
-    def _partitionSamplesByAllele(self, cstrain):
+    def _partitionSamplesByAllele(self, cstrain, shuffle=False):
         """
         Get a dictionary of lists of sample names and ages partitioned by allele in increasing
             age order.
@@ -245,31 +238,47 @@ class Worker:
         mi = self._mi
 
         samples = {}
-        for allele in self.getAlleles(cstrain):
-            samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
-            samples[allele].sort()
-        self._sample_x_allele = samples 
+        if not shuffle:
+            for allele in self.getAlleles(cstrain):
+                samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
+                samples[allele].sort()
+        else:
+            #test
+            old = copy.deepcopy(self._sample_x_allele)
+            all_samples = mi.getSampleIDs(cstrain)[:]
+            random.shuffle(all_samples)
+            for allele in self.getAlleles(cstrain):
+                n = len(mi.getSampleIDs(cstrain,allele))
+                samples[allele] = [(mi.getAge(s),s) for s in all_samples[:n]]
+                samples[allele].sort()
+                all_samples = all_samples[n:]
+        self._sample_x_allele[cstrain] = samples 
 
-    def initStrain(self, cstrain, mypws):
+
+    def initStrain(self, cstrain, mypws, shuffle=False):
         self._cstrain = cstrain
-        self._partitionSamplesByAllele(cstrain)
+        self._partitionSamplesByAllele(cstrain, shuffle)
         self._results[cstrain] = self.initRMSDFrame( mypws, cstrain )
 
     def getSamplesByAllele(self, cstrain, allele):
-        assert( cstrain == self._cstrain )
-        return self._sample_x_allele[allele]
+        return self._sample_x_allele[cstrain][allele]
 
     def genSRTs(self, cstrain, pw):
-        self.p.start("genSRTs[%s]" % cstrain)
-        srts = {}
-        sd = self._sd
-        mi = self._mi
-        for allele in self.getAlleles(cstrain):
-            samples = [s for a,s in self._sample_x_allele[allele]]
+        #self.p.start("genSRTs")
+        if (cstrain, pw) not in self._srt_cache:
+          
+            srts = None 
+            sd = self._sd
+            mi = self._mi
+            samples = []
+            for allele in self.getAlleles(cstrain):
+                samples += [s for a,s in self._sample_x_allele[cstrain][allele]]
+                #self.p.start("getExpression")
             expFrame = sd.getExpression( pw, samples)
-            srts[allele] = dirac.getSRT( expFrame )
-        self.p.end("genSRTs[%s]" % cstrain)
-        return srts
+            srts = dirac.getSRT( expFrame )
+            self._srt_cache[(cstrain,pw)] = srts
+
+        return self._srt_cache[(cstrain, pw)]
 
     def getRMS(self, rt, srt):
         return dirac.getRMS( srt, rt )
@@ -294,7 +303,8 @@ class Worker:
             for pw in mypws:
                 alleles = self.getAlleles(strain)
                 for b_allele in alleles:
-                    samps = [s for s in self._mi.getSampleIDs(strain, b_allele)]
+                    samps = [s for a,s in self.getSamplesByAllele(strain, b_allele)]
+
                     b_rows = ["%s_%s" %(pw,allele) for allele in alleles if allele != b_allele]
                     
                     for samp in samps:
@@ -302,8 +312,120 @@ class Worker:
                         for row in b_rows:
                             if res.loc[row,samp] >= res.loc["%s_%s" % (pw, b_allele), samp]:
                                 class_dict[strain][samp][pw] = 0
+            class_dict[strain] = class_dict[strain].sum(1)
         self._classification_res = class_dict
         return class_dict
+
+    def runBase(self, k_neighbors):
+        wkr = self
+        logging.info("running base")
+        for cstrain in wkr.getStrains():
+            logging.info("Strain[%s] starting" % cstrain)
+            mypws = wkr.getMyPathways()
+            alleles = wkr.getAlleles(cstrain)
+            wkr.initStrain(cstrain, mypws, shuffle=False)
+            for pw in mypws:
+                rt_cache = {} 
+                srts = wkr.genSRTs( cstrain, pw )
+                for a_base, a_compare in itertools.product(alleles,alleles):
+                    r_index = "%s_%s" % (pw, a_compare)
+                    base_samp = wkr.getSamplesByAllele(cstrain, a_base)
+                    comp_samp = wkr.getSamplesByAllele(cstrain,a_compare)
+                    for age, samp in base_samp:
+                        neighbors = wkr.kNearest(comp_samp, samp, age, k_neighbors)
+                        nhash = ''.join(neighbors)
+                        if nhash not in rt_cache:
+                            srt_comp = srts.loc[:,neighbors]
+                            rt = dirac.getRT(srt_comp)
+                            rt_cache[nhash] = rt
+                        else:
+                            rt = rt_cache[nhash]
+                        samp_srt = srts[samp]
+                        rms = wkr.getRMS( rt, samp_srt ) 
+                        wkr.setRMS(rms, r_index, samp)
+        c = wkr.classify()
+        return c
+
+    def runPerm(self, num_runs, k_neighbors,truth):
+        wkr = self
+        c_results = {}
+        for k,v in truth.iteritems():
+            c_results[k] = v.copy()
+            for i in v.index:
+                c_results[k][i] = 0  
+            
+        test = []
+        for ctr in range(num_runs): 
+            temp = {}
+            check = True
+            for cstrain in wkr.getStrains():
+                logging.info("Strain[%s] starting" % cstrain)
+                mypws = wkr.getMyPathways()
+                alleles = wkr.getAlleles(cstrain)
+                wkr.initStrain(cstrain, mypws, shuffle=True)
+                for pw in mypws:
+                    rt_cache = {} 
+                    srts = wkr.genSRTs( cstrain, pw )
+                    for a_base, a_compare in itertools.product(alleles,alleles):
+                        r_index = "%s_%s" % (pw, a_compare)
+                        base_samp = wkr.getSamplesByAllele(cstrain, a_base)
+                        #testing shuffle
+                        temp[(pw,cstrain,a_base)] = base_samp
+                        if len(test) > 0:
+                            same = True
+                            for x in temp[(pw,cstrain,a_base)]:
+                                if x not in test[-1][(pw,cstrain,a_base)]:
+                                    same = False
+                            msg = 'In runperm\n'+ ''.join(map(str, temp[(pw,cstrain,a_base)]))+ '\n and \n '+''.join( map(str,test[-1][(pw,cstrain,a_base)]) )
+                            assert same == False, msg
+
+                        if check and self._comm.rank == 0:
+                            print ctr,a_base, base_samp[:5]
+                        comp_samp = wkr.getSamplesByAllele(cstrain,a_compare)
+                        for age, samp in base_samp:
+                            neighbors = wkr.kNearest(comp_samp, samp, age, k_neighbors)
+                            nhash = ''.join(neighbors)
+                            if nhash not in rt_cache:
+                                srt_comp = srts.loc[:,neighbors]
+                                rt = dirac.getRT(srt_comp)
+                                rt_cache[nhash] = rt
+                            else:
+                                rt = rt_cache[nhash]
+                            samp_srt = srts[samp]
+                            rms = wkr.getRMS( rt, samp_srt ) 
+                            wkr.setRMS(rms, r_index, samp)
+                    check = False
+            test.append(temp)
+            c = wkr.classify()
+            
+            for key in c.keys():
+                for i in c[key].index:
+                    if truth[key][i] <= c[key][i]:
+                        msg = "key: [%s] index[%s] ctr[%i] value[%i]" %(key,i,ctr,c_results[key][i])
+                        assert c_results[key][i] <= ctr, msg
+                        c_results[key][i] += 1
+                        
+                truth[key].to_pickle('/scratch/sgeadmin/unjoined.truth.perm.%s.df.%i.%i.pkl'%(key,self._comm.rank,ctr))
+                c[key].to_pickle('/scratch/sgeadmin/unjoined.perm.%s.df.%i.%i.pkl'%(key,self._comm.rank,ctr))
+        return c_results       
+
+    def joinResults(self, results):
+        all_results = None
+        if self._comm.rank == 0:
+            pws = self._sd.getPathways()
+            strains = self.getStrains()
+            comb_results =  pandas.DataFrame(np.zeros((len(pws), len(strains)), dtype=int), index=pws,columns=strains)
+        all_results = self._comm.gather(results)
+        
+        if self._comm.rank == 0:
+            for r in all_results:
+                for strain,series in r.iteritems(): 
+                    for i in series.index:
+                        comb_results[strain][i] = series[i]
+            return comb_results
+        return None
+        
+
         
 if __name__ == "__main__":
     world_comm = MPI.COMM_WORLD
@@ -313,50 +435,48 @@ if __name__ == "__main__":
                 'working_dir':'/scratch/sgeadmin/hddata/', 
                 'working_bucket':'hd_working_0', 
                 'ds_bucket':'hd_source_data', 
-                'logging_level':logging.CRITICAL
+                'logging_level':logging.INFO
                 }
-    k_neighbors = 5
-
+    k_neighbors = 20
+    num_runs=50
+    class_acc = []
     #a dictionary to hold the result dataframes, keyed by strain
     results = {}
 
     wkr = Worker(**worker_settings) 
-    wkr.p.start("Creating RMS")    
-    for cstrain in wkr.getStrains():
-        logging.info("Strain[%s] starting" % cstrain)
-        wkr.p.start("getMyPways[%s]" % cstrain)
-        mypws = wkr.getMyPathways()
-        wkr.p.end("getMyPways[%s]" % cstrain)
-        alleles = wkr.getAlleles(cstrain)
-        wkr.p.start("initStrain(%s,%s)"%(cstrain, mypws[0]))
-        wkr.initStrain(cstrain, mypws)
-        wkr.p.end("initStrain(%s,%s)"%(cstrain, mypws[0]))
-        wkr.p.start("looping pws[%s]" % cstrain)
-        for pw in mypws:
-            srts = wkr.genSRTs( cstrain, pw )
-            wkr.p.start("looping minus SRT[%s]"%cstrain)
-            for a_base, a_compare in itertools.product(alleles,alleles):
-                r_index = "%s_%s" % (pw, a_compare)
-                base_samp = wkr.getSamplesByAllele(cstrain, a_base)
-                comp_samp = wkr.getSamplesByAllele(cstrain,a_compare)
-                for age, samp in base_samp:
-                    neighbors = wkr.kNearest(comp_samp, samp, age, k_neighbors)
-                    srt_comp = srts[a_compare].loc[:,neighbors]
-                    rt = dirac.getRT(srt_comp) 
-                    samp_srt = srts[a_base][samp]
-                    rms = wkr.getRMS( rt, samp_srt ) 
-                    wkr.setRMS(rms, r_index, samp)
-        
-            wkr.p.end("looping minus SRT[%s]"%cstrain)
-        wkr.p.end("looping pws[%s]" % cstrain)
-    wkr.p.end("Creating RMS")    
-    #wkr.saveRMS()
-    wkr.p.start("Classifying")        
-    c = wkr.classify()
-    wkr.p.end("Classifying")        
-    wkr.p.printLog(ranks=[0,1])
+    truth = wkr.runBase(k_neighbors)
+    r = wkr.runPerm(num_runs, k_neighbors, truth)
+    for key in r.keys():
+        r[key].to_pickle('/scratch/sgeadmin/results.%s.df.%i.pkl'%(key,world_comm.rank) )
+    comb_results = wkr.joinResults(r)
+    if world_comm.rank == 0:
+        comb_results.to_pickle('/scratch/sgeadmin/comb_results.%s.pkl' % k_neighbors)
     """
-    for strain in c.keys():
-        ofile_name = '%s.%s.%i.pandas.pkl' % ('classify',strain,wkr._comm.rank) 
-        c[strain].to_pickle(op.join(wkr._working_dir,ofile_name))"""
+    for ctr in range(num_runs): 
+        for cstrain in wkr.getStrains():
+            logging.info("Strain[%s] starting" % cstrain)
+            mypws = wkr.getMyPathways()
+            alleles = wkr.getAlleles(cstrain)
+            wkr.initStrain(cstrain, mypws, shuffle=True)
+            for pw in mypws:
+                rt_cache = {} 
+                srts = wkr.genSRTs( cstrain, pw )
+                for a_base, a_compare in itertools.product(alleles,alleles):
+                    r_index = "%s_%s" % (pw, a_compare)
+                    base_samp = wkr.getSamplesByAllele(cstrain, a_base)
+                    comp_samp = wkr.getSamplesByAllele(cstrain,a_compare)
+                    for age, samp in base_samp:
+                        neighbors = wkr.kNearest(comp_samp, samp, age, k_neighbors)
+                        nhash = ''.join(neighbors)
+                        if nhash not in rt_cache:
+                            srt_comp = srts[a_compare].loc[:,neighbors]
+                            rt = dirac.getRT(srt_comp)
+                            rt_cache[nhash] = rt
+                        else:
+                            rt = rt_cache[nhash]
+                        samp_srt = srts[a_base][samp]
+                        rms = wkr.getRMS( rt, samp_srt ) 
+                        wkr.setRMS(rms, r_index, samp)
+        c = wkr.classify()
+        class_acc.append(c)"""
 

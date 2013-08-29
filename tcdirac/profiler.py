@@ -1,5 +1,6 @@
 import time
 from mpi4py import MPI
+import numpy as np
 class MPIProfiler:
     START = 123
     END = 124
@@ -16,7 +17,7 @@ class MPIProfiler:
     def addMeta(self, key, value):
         self.meta[key] = value
 
-    def printLog(self,ranks = None):
+    def printLog(self,ranks = None, acc=False):
         comm = MPI.COMM_WORLD
         profilers = comm.gather(self)
         if comm.rank == 0:
@@ -26,11 +27,11 @@ class MPIProfiler:
                     for key, value in profiler.meta.iteritems():
                         print "%s: [%s]" % (key, str(value))
                     print "-"*20
-                    for label,rt in profiler.parseLog():
-                        print "\t%s : [%f]" % (label,rt)
+                    for label,rt in profiler.parseLog(acc=acc):
+                        print "\t%s\t[%s]" % (label,str(rt))
 
 
-    def parseLog(self):
+    def parseLog(self, acc=False):
         parsed = []
         start = {}
         for lab, sore, t in self.log :
@@ -38,6 +39,23 @@ class MPIProfiler:
                 start[lab] = t
             else:
                 parsed.append((lab, t-start[lab]))
+        if acc:
+            acc_parsed = {}
+            for lab,t in parsed:
+                if lab not in acc_parsed:
+                    acc_parsed[lab] = []
+                acc_parsed[lab].append(t)
+            new_parsed = []
+            for lab,t in parsed:
+                if acc_parsed[lab] is not None:
+                    total = sum(acc_parsed[lab])
+                    m = max(acc_parsed[lab])
+                    med = np.median(acc_parsed[lab])
+                    num = len(acc_parsed[lab])
+                    out = "total[%f]\t count[%i]\tmax[%f]\tmed[%f]" % (total, num, m, med)
+                    new_parsed.append((lab, out))
+                    acc_parsed[lab] = None
+            parsed = new_parsed
         return parsed
             
     
