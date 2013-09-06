@@ -86,9 +86,17 @@ __global__ void rtKernel2( int * toReduce, int * final, int nsamples){
     final[g_pair] = nsamples/2 < count;
 }"""% '+'.join(['toReduce[%i*g_pair + %i]'%(nblocks,i) for i in range(nblocks)])
     return a
-class Dirac:
 
-    def __init__(self, expression_matrix, device_id=0):
+class Dirac:
+    """
+    A gpu based dirac implementation
+    """
+    #TODO: test different block sizes
+    def __init__(self, expression_matrix, device_id=0, b_size=32):
+        """
+        takes an expression matrix - numpy array shape(ngenes,nsamples)
+            and a device_id which determines which gpu to use, default[0]
+        """
         
         self.exp = expression_matrix
         self.exp_gpu = None
@@ -96,6 +104,8 @@ class Dirac:
         self.rt1Kern = None
         self.rt2Kern = {}
         self.rmsKern = None
+        self.b_size = b_size
+        #init gpu
         drv = cuda
         drv.init()
         dev = drv.Device(device_id)
@@ -121,16 +131,24 @@ class Dirac:
             buff[:old_r] = frm
         return buff
 
-    def getSRT(self, gmap, b_size=32, store_srt=False):
+    def getSRT(self, gmap,  store_srt=False):
         """
-        exp is a 2d numpy array shaped genesxsamples
-            i.e exp[0,3] is gene 0 for sample 3
+        Computes the sample rank templates for the expression matrix(on instantiation) and 
+        gmap
+
         gmap is a 1d numpy array where gmap[2*i] and gmap[2*i +1] are 
             gene indices for comparison i
+
+        b_size is the block size to use in gpu computation
+
+        store_srt - determines what is returned,
+            False(default) - returns the srt numpy array (npairs,nsamp)
+            True - returns the srt_gpu object and the object's padded shape (npairs,nsamp)
         """
         #the x coords in the gpu map to sample_ids
         #the y coords to gmap
         #sample blocks
+        b_size = self.b_size
         exp = self.exp 
         g_y_sz = self.getGrid( exp.shape[1] )
         #pair blocks
@@ -173,17 +191,31 @@ class Dirac:
             return srt_buffer[:gmap.shape[0]/2,:self.exp.shape[1]]
             
 
-    def getRT(self, s_map, srt_gpu, srt_nsamp, srt_npairs, npairs, b_size=32, store_rt=False):
+    def getRT(self, s_map, srt_gpu, srt_nsamp, srt_npairs, npairs, store_rt=False):
+        """
+        Computes the rank template
 
+        s_map(Sample Map) -  an list of 1s and 0s of length nsamples where 1 means use this sample
+            to compute rank template
+        srt_gpu - cuda memory object containing srt(sample rank template) array on gpu
+        srt_nsamp, srt_npairs - shape(buffered) of srt_gpu object
+        npairs - true number of gene pairs being compared
+        b_size - size of the blocks for computation
+        store_rt - determines the RETURN value
+            False(default) = returns an numpy array shape(npairs) of the rank template
+            True = returns the rt_gpu object and the padded size of the rt_gpu objet (rt_obj, npairs_padded)
+        """
+
+        b_size = self.b_size
         s_map_buff = np.array(s_map + [0 for i in range(srt_nsamp - len(s_map))],dtype=np.int32)
 
         s_map_gpu = cuda.mem_alloc(s_map_buff.nbytes)
         cuda.memcpy_htod(s_map_gpu, s_map_buff)
         
         #sample blocks
-        g_y_sz = self.getGrid( srt_nsamp, b_size )
+        g_y_sz = self.getGrid( srt_nsamp)
         #pair blocks
-        g_x_sz = self.getGrid( srt_npairs,b_size )
+        g_x_sz = self.getGrid( srt_npairsb_size )
         
         block_rt_gpu = cuda.mem_alloc(int(g_y_sz*srt_npairs*(np.uint32(1).nbytes)) ) 
         rt_gpu = cuda.mem_alloc(int(srt_npairs*(np.uint32(1).nbytes))) 
@@ -193,7 +225,6 @@ class Dirac:
         func1,func2 = self.getrtKern(g_y_sz)
 
         shared_size = b_size*b_size*np.uint32(1).nbytes
-        #int * srt, int nsamples, int gpairs, int * sample_map, int * rt,int num_blocks
 
         func1( srt_gpu, np.uint32(srt_nsamp), np.uint32(srt_npairs), s_map_gpu, block_rt_gpu, np.uint32(g_y_sz), block=(b_size,b_size,1), grid=grid, shared=shared_size)
 
@@ -211,7 +242,16 @@ class Dirac:
             rt_gpu.free()
             return rt_buffer[:npairs]
 
-    def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs, b_size=32):
+    def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs):
+        """
+        Returns the rank matching score
+        rt_gpu - rank template gpu object (padded_npairs,)
+        srt_gpu - sample rank template gpu object (padded_npairs, padded_samples)
+        samp_id - the sample id to compare srt to rt
+        npairs - true number of pairs
+        b_size - the block size for gpu computation.
+        """
+        b_size = self.b_size
         gsize = int(padded_npairs/b_size)
         result = np.zeros((gsize,), dtype=np.int32)
         result_gpu = cuda.mem_alloc(result.nbytes)
@@ -223,17 +263,15 @@ class Dirac:
         cuda.memcpy_dtoh(result, result_gpu)
         return result.sum()/float(npairs)
 
-        #__global__ void rmsKernel( int * rt, int * srt, int sample_id, int padded_samples  int true_npairs, int * result){
-
-
-    def initExp(self, b_size=32):
+    def initExp(self):
         """
         pads the expression matrix to fit in gpu
         sends the padded expression matrix to gpu
         """ 
+        b_size = self.b_size
         self.clearExp()
         exp = self.exp
-        g_x_sz = self.getGrid( exp.shape[1], b_size )
+        g_x_sz = self.getGrid( exp.shape[1] )
         exp_buffer = self.getBuff(exp,  exp.shape[0], g_x_sz*b_size, np.float32)
         
         exp_gpu = cuda.mem_alloc(exp_buffer.nbytes)
@@ -242,6 +280,9 @@ class Dirac:
 
 
     def getsrtKern(self):
+        """
+        Returns the sample rank template kernel function
+        """
         if self.srtKern is None:
             mod = SourceModule(Kern.srt)
             func = mod.get_function("srtKernel")
@@ -249,6 +290,12 @@ class Dirac:
         return self.srtKern
 
     def getrtKern(self,nblocks):
+        """
+        Returns the rank template kernel functions
+        nblocks refers to the grid size for rt
+        (func1,func2)
+        func2 finishes the sum reduction
+        """
         if self.rt1Kern is None:
             mod = SourceModule(Kern.rt1)
             func1 = mod.get_function("rtKernel1")
@@ -261,6 +308,9 @@ class Dirac:
         return (self.rt1Kern, self.rt2Kern[nblocks])
 
     def getrmsKern(self):
+        """
+        Returns the rank matching score kernel
+        """
         if self.rmsKern is None:
             mod = SourceModule(Kern.rms)
             func = mod.get_function("rmsKernel")
@@ -269,6 +319,9 @@ class Dirac:
         
         
     def clearExp(self):
+        """
+        Frees the expression gpu object 
+        """
         if self.exp_gpu is not None:
             self.exp_gpu.free()
             self.exp_gpu = None
@@ -276,7 +329,13 @@ class Dirac:
         
 
 
-    def getGrid(self,num_items, b_size=32):
+    def getGrid(self,num_items):
+        """
+        Given the number of items, return the number of grids required 
+        to 
+        """
+        
+        b_size = self.b_size
         g = int(num_items/b_size)#get grid spacing
         if num_items%b_size != 0:
             g += 1
@@ -405,7 +464,7 @@ def testRMS():
     n=10
     gn = 3000
     ns = 10
-    for n in [100]:#range(10,100,13):
+    for n in range(10,100,13):
 
         samples = map(lambda x:'s%i'%x, range(n))
         genes = map(lambda x:'g%i'%x, range(gn))
@@ -420,7 +479,7 @@ def testRMS():
         d = Dirac(np_exp)
         d.initExp()
 
-        for ns in [50]:#range(10,200,17):   
+        for ns in range(3,200,17):   
             print "testRT: num_samples[%i] net_size[%i]" % ( n, ns )
             test_start = time.time()
             ic = itertools.combinations
@@ -445,31 +504,30 @@ def testRMS():
             rt_start = time.time()
             rt_gpu, rt_len  = d.getRT(s_map, srt_gpu, srt_nsamp, srt_npairs, len(gm_list)/2, store_rt=True) 
             rt_end = time.time()
+            rt_buff = np.zeros((rt_len,), dtype=np.int32)
+            cuda.memcpy_dtoh(rt_buff, rt_gpu )
+            npairs_len = len(["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
+            
+            rt = rt_buff[:npairs_len]
+            srt_buff = np.zeros((srt_npairs, srt_nsamp), dtype=np.int32)
+            cuda.memcpy_dtoh( srt_buff, srt_gpu)
 
+            srt = srt_buff[:npairs_len, :n]
             print "rt [%f]" % (rt_end-rt_start)
             #print rt
             #srt_gpu.free()
-            """
             res = pandas.Series( rt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
             #print res
-            ctr = 0
-            for g1, g2 in  ic(net,2):
-                if True or ctr < 1:
-                    mysum = 0
-                    for s,i in zip(exp.columns, s_map):
-                        if exp[s][g1] < exp[s][g2]:
-                            mysum += i 
-                    if sum(s_map)/2 < mysum:
-                        assert(res["%s < %s" % (g1,g2)] == 1)
-                    else:
-                        assert(res["%s < %s" % (g1,g2)] == 0)
-                    
-                ctr += 1"""
             test_end = time.time()
             print "test [%f]" % (test_end-test_start)
             for i in range(n):
                 rms = d.getRMS(rt_gpu, srt_gpu, srt_nsamp, srt_npairs, i, len(gm_list)/2)    
-                print rms
+                cnt = 0
+                for gn in range(npairs_len):
+                    if srt[gn,i] == rt[gn]:
+                        cnt += 1
+            
+                assert abs(rms - cnt/float(npairs_len)) < .01, "rms does not match gpu[%f] serial[%f]" % (rms, cnt/float(npairs_len))
 
             
 def getGmap(netsize):
