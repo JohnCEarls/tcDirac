@@ -9,6 +9,7 @@ import math
 from mpi4py import MPI
 import itertools
 import time
+import pycuda.gpuarray as ga
 class Kern:
     srt = """
 
@@ -59,11 +60,11 @@ class Kern:
 
 """
 
-    rms1 = """
-        __global__ void rmsKernel( int * rt, int * srt, int sample_id, int padded_samples  int true_npairs, int * result){
+    rms = """
+        __global__ void rmsKernel( int * rt, int * srt, int sample_id, int padded_samples,  int true_npairs, int * result){
             extern __shared__ int s_srt[];
             int i = blockIdx.x*blockDim.x + threadIdx.x;
-            s_srt[threadIdx.x] = (rt[i] == srt[i * padded_samples + sample_id]) && (i < true_npairs)
+            s_srt[threadIdx.x] = ((rt[i] == srt[i * padded_samples + sample_id]) && (i < true_npairs));
             
             for(unsigned int stride= blockDim.x/2; stride > 0; stride/=2){
                 __syncthreads();
@@ -94,7 +95,7 @@ class Dirac:
         self.srtKern = None
         self.rt1Kern = None
         self.rt2Kern = {}
-        #pycuda.autoinit.context.get_device(device_id) 
+        self.rmsKern = None
         drv = cuda
         drv.init()
         dev = drv.Device(device_id)
@@ -159,6 +160,7 @@ class Dirac:
 
         gmap_gpu.free()
         
+       
         if store_srt:
             #this is in case we want to run further stuff without 
             #transferring back and forth
@@ -195,9 +197,6 @@ class Dirac:
 
         func1( srt_gpu, np.uint32(srt_nsamp), np.uint32(srt_npairs), s_map_gpu, block_rt_gpu, np.uint32(g_y_sz), block=(b_size,b_size,1), grid=grid, shared=shared_size)
 
-        #DEBUG
-        t = np.empty((g_y_sz,srt_npairs),dtype=np.int32)
-        cuda.memcpy_dtoh(t,block_rt_gpu)
 
         func2( block_rt_gpu, rt_gpu, np.int32(s_map_buff.sum()), block=(b_size,1,1), grid=(g_x_sz,))
 
@@ -205,19 +204,27 @@ class Dirac:
         if store_rt:
             #this is in case we want to run further stuff without 
             #transferring back and forth
-            return rt_gpu
+            return (rt_gpu, srt_npairs)
         else:
             rt_buffer = np.zeros((srt_npairs ,), dtype=np.int32)
             cuda.memcpy_dtoh(rt_buffer, rt_gpu)
             rt_gpu.free()
             return rt_buffer[:npairs]
 
+    def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs, b_size=32):
+        gsize = int(padded_npairs/b_size)
+        result = np.zeros((gsize,), dtype=np.int32)
+        result_gpu = cuda.mem_alloc(result.nbytes)
+         
+        #result = np.empty((gsize,), dtype=np.int32)
+        func = self.getrmsKern()
+        func( rt_gpu, srt_gpu, np.int32(samp_id), np.int32(padded_samples), np.int32(npairs), result_gpu, block=(b_size,1,1), grid=(int(gsize),), shared=b_size*np.uint32(1).nbytes )
+        #result = np.zeros((gsize,), dtype=np.int32)
+        cuda.memcpy_dtoh(result, result_gpu)
+        return result.sum()/float(npairs)
 
-    def getRMS(self, 
+        #__global__ void rmsKernel( int * rt, int * srt, int sample_id, int padded_samples  int true_npairs, int * result){
 
-"""
-__global__ void rmsKernel( int * rt, int * srt, int true_npairs, int * result){
-"""
 
     def initExp(self, b_size=32):
         """
@@ -228,6 +235,7 @@ __global__ void rmsKernel( int * rt, int * srt, int true_npairs, int * result){
         exp = self.exp
         g_x_sz = self.getGrid( exp.shape[1], b_size )
         exp_buffer = self.getBuff(exp,  exp.shape[0], g_x_sz*b_size, np.float32)
+        
         exp_gpu = cuda.mem_alloc(exp_buffer.nbytes)
         cuda.memcpy_htod(exp_gpu, exp_buffer)
         self.exp_gpu = exp_gpu
@@ -251,6 +259,13 @@ __global__ void rmsKernel( int * rt, int * srt, int true_npairs, int * result){
             func2 = mod.get_function("rtKernel2")
             self.rt2Kern[nblocks] = func2
         return (self.rt1Kern, self.rt2Kern[nblocks])
+
+    def getrmsKern(self):
+        if self.rmsKern is None:
+            mod = SourceModule(Kern.rms)
+            func = mod.get_function("rmsKernel")
+            self.rmsKern = func
+        return self.rmsKern
         
         
     def clearExp(self):
@@ -270,9 +285,9 @@ __global__ void rmsKernel( int * rt, int * srt, int true_npairs, int * result){
 
 def testSRT():
     
-    for n in range(100,200,17):
+    for n in range(100,120,17):
         samples = map(lambda x:'s%i'%x, range(n))
-        for gn in range(1000,2000,371):
+        for gn in range(1000,1111,371):
             suck = False
             genes = map(lambda x:'g%i'%x, range(gn))
 
@@ -290,7 +305,9 @@ def testSRT():
                 g_d[gene] = i 
             samples = exp.columns
             d = Dirac(np_exp)
+            print "a"
             d.initExp()
+            print "b" 
             for ns in range(10, 100,17):
                 ic = itertools.combinations
                 gm_list = []
@@ -300,6 +317,7 @@ def testSRT():
                 gm = np.array(gm_list, dtype=np.int32)
                 srt = d.getSRT(gm)
                 res = pandas.DataFrame( srt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)],columns=samples)
+                """
                 for i in res.index:
                     g1,g2 = i.split(' < ')
                     
@@ -310,8 +328,7 @@ def testSRT():
                         if res[s][i] == 1:
                             assert exp[s][g1] < exp[s][g2], "does not match"
                         else:
-                            assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)
-
+                            assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)"""
                 
                 
     
@@ -383,6 +400,78 @@ def testRT():
         
 
 
+def testRMS():
+
+    n=10
+    gn = 3000
+    ns = 10
+    for n in [100]:#range(10,100,13):
+
+        samples = map(lambda x:'s%i'%x, range(n))
+        genes = map(lambda x:'g%i'%x, range(gn))
+
+        exp = pandas.DataFrame(np.random.rand(len(genes),len(samples)), dtype=float, index=genes, columns=samples)
+        np_exp = exp.values
+        genes = exp.index
+        g_d = {}
+        for i,gene in enumerate(genes):
+            g_d[gene] = i 
+        samples = exp.columns
+        d = Dirac(np_exp)
+        d.initExp()
+
+        for ns in [50]:#range(10,200,17):   
+            print "testRT: num_samples[%i] net_size[%i]" % ( n, ns )
+            test_start = time.time()
+            ic = itertools.combinations
+            gm_list = []
+            net = random.sample(genes,ns) 
+            for g1,g2 in ic(net,2):
+                gm_list += [g_d[g1],g_d[g2]]
+            gm = np.array(gm_list, dtype=np.int32)
+
+            srt_start = time.time()
+            (srt_gpu, srt_npairs, srt_nsamp) = d.getSRT(gm,store_srt=True)
+            srt_end = time.time()
+            print "srt [%f]" % (srt_end-srt_start)
+            s_map = []
+            for i in range(n):
+                if random.random() > .8:
+                    s_map.append(1)
+                else:
+                    s_map.append(0)
+
+            #print s_map
+            rt_start = time.time()
+            rt_gpu, rt_len  = d.getRT(s_map, srt_gpu, srt_nsamp, srt_npairs, len(gm_list)/2, store_rt=True) 
+            rt_end = time.time()
+
+            print "rt [%f]" % (rt_end-rt_start)
+            #print rt
+            #srt_gpu.free()
+            """
+            res = pandas.Series( rt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
+            #print res
+            ctr = 0
+            for g1, g2 in  ic(net,2):
+                if True or ctr < 1:
+                    mysum = 0
+                    for s,i in zip(exp.columns, s_map):
+                        if exp[s][g1] < exp[s][g2]:
+                            mysum += i 
+                    if sum(s_map)/2 < mysum:
+                        assert(res["%s < %s" % (g1,g2)] == 1)
+                    else:
+                        assert(res["%s < %s" % (g1,g2)] == 0)
+                    
+                ctr += 1"""
+            test_end = time.time()
+            print "test [%f]" % (test_end-test_start)
+            for i in range(n):
+                rms = d.getRMS(rt_gpu, srt_gpu, srt_nsamp, srt_npairs, i, len(gm_list)/2)    
+                print rms
+
+            
 def getGmap(netsize):
     tmp_gm = []
     for i in range(netsize-1):
@@ -405,7 +494,7 @@ def getBuff(frm,new_r, new_c,b_dtype):
     return buff
     
 if __name__ == "__main__":
-    testRT()
+    testRMS()
     """
     print rtfinish(3)
 
@@ -421,7 +510,7 @@ if __name__ == "__main__":
     x = np.float32(1.0)
     exp = np.zeros((ngenes,nsamples))
     for i in range(exp.shape[0]):
-        for j in range(exp.shape[1]):
+
             exp[i,j] = i%2 
 
 
