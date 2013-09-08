@@ -215,7 +215,7 @@ class Dirac:
         #sample blocks
         g_y_sz = self.getGrid( srt_nsamp)
         #pair blocks
-        g_x_sz = self.getGrid( srt_npairsb_size )
+        g_x_sz = self.getGrid( srt_npairs )
         
         block_rt_gpu = cuda.mem_alloc(int(g_y_sz*srt_npairs*(np.uint32(1).nbytes)) ) 
         rt_gpu = cuda.mem_alloc(int(srt_npairs*(np.uint32(1).nbytes))) 
@@ -342,6 +342,10 @@ class Dirac:
         return g
 
 
+"""
+Test code
+"""
+
 def testSRT():
     
     for n in range(100,120,17):
@@ -364,9 +368,9 @@ def testSRT():
                 g_d[gene] = i 
             samples = exp.columns
             d = Dirac(np_exp)
-            print "a"
+            #print "a"
             d.initExp()
-            print "b" 
+            #print "b" 
             for ns in range(10, 100,17):
                 ic = itertools.combinations
                 gm_list = []
@@ -376,7 +380,6 @@ def testSRT():
                 gm = np.array(gm_list, dtype=np.int32)
                 srt = d.getSRT(gm)
                 res = pandas.DataFrame( srt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)],columns=samples)
-                """
                 for i in res.index:
                     g1,g2 = i.split(' < ')
                     
@@ -387,7 +390,7 @@ def testSRT():
                         if res[s][i] == 1:
                             assert exp[s][g1] < exp[s][g2], "does not match"
                         else:
-                            assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)"""
+                            assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)
                 
                 
     
@@ -529,140 +532,14 @@ def testRMS():
             
                 assert abs(rms - cnt/float(npairs_len)) < .01, "rms does not match gpu[%f] serial[%f]" % (rms, cnt/float(npairs_len))
 
-            
-def getGmap(netsize):
-    tmp_gm = []
-    for i in range(netsize-1):
-        for j in range(i+1,netsize):
-            tmp_gm += [i,j]
 
-    return np.array(tmp_gm)
-
-
-def getBuff(frm,new_r, new_c,b_dtype):
-    try:
-        old_r,old_c =  frm.shape
-        buff = np.zeros((new_r,new_c),dtype=b_dtype)
-        buff[:old_r,:old_c] = frm
-    except ValueError:
-        #oned
-        old_r = frm.shape[0]
-        buff = np.zeros((new_r,),dtype=b_dtype)
-        buff[:old_r] = frm
-    return buff
-    
 if __name__ == "__main__":
-    testRMS()
-    """
-    print rtfinish(3)
-
-    b_size = 32 
-
-
-    F_BYTES = np.float32(1.0).nbytes
-    I_BYTES = np.int32(1).nbytes
-
-    ngenes = 20 
-    npairs = ngenes 
-    nsamples = 64 
-    x = np.float32(1.0)
-    exp = np.zeros((ngenes,nsamples))
-    for i in range(exp.shape[0]):
-
-            exp[i,j] = i%2 
-
-
-    tmp_gm = [i%2 for i in range(nsamples)]
-    ctr = 0
-
-
-    s_map = np.array(tmp_gm)
-    
-
-    #npairs (x axis on gpu)
-    g1 = int(npairs/b_size)#get grid spacing
-
-
-    if npairs%b_size != 0:
-        g1 += 1
-
-    #nsmples (y axis on gpu)
-
-    g2 = int(nsamples/b_size)#get grid spacing
-
-    #pairs x samples
-    if nsamples%b_size != 0:
-        g2 += 1
-
-    print "g1(gp)",g1
-    print "g2(samp)", g2
-
-    npairs_buff = g1*b_size
-    nsamp_buff = g2*b_size
-
-    exp_buffer = getBuff(exp, ngenes , g2*b_size, np.int32)
-    s_map_buffer = getBuff(s_map,(g2*b_size), 1,np.int32)
-    srt_buffer_size = (g2*(g1*b_size))*I_BYTES
-
-    exp_gpu = cuda.mem_alloc(exp_buffer.nbytes)
-    s_map_gpu = cuda.mem_alloc(s_map_buffer.nbytes)
-    srt_gpu = cuda.mem_alloc(srt_buffer_size)
-    rt_gpu = cuda.mem_alloc( npairs_buff*I_BYTES )
-
-    cuda.memcpy_htod(exp_gpu, exp_buffer)
-    cuda.memcpy_htod(s_map_gpu, s_map_buffer)
-
-    mod = SourceModule(Kern.rt)
-    func1 = mod.get_function("rtKernel1")
-
-    shared_size = b_size*b_size*I_BYTES
-
-    func1( exp_gpu, np.uint32(nsamp_buff), np.uint32(npairs_buff), s_map_gpu, srt_gpu, np.uint32(g2), block=(b_size,b_size,1), grid=(g1,g2), shared=shared_size)
-    mod = SourceModule(rtfinish(g2))
-    func2 = mod.get_function("rtKernel2")
-    func2( srt_gpu, rt_gpu, np.int32(s_map.sum()), block=(b_size,1,1), grid=(g1,))
-    
-    rt_buff = np.empty( (npairs_buff,),dtype=np.int32)
-    cuda.memcpy_dtoh(rt_buff, rt_gpu)
-    print rt_buff
-    #srt_buff = np.empty( (npairs_buff,g2 ),dtype=np.uint32)
-    #cuda.memcpy_dtoh(srt_buff, srt_gpu)
-    exp_gpu.free()
-    srt_gpu.free()
-    s_map_gpu.free()"""
-    """
-    print "exp"
-    print exp_buffer[:4,:].astype(int)
-
-    print "gmap"
-    print gmap"""
-
-    #print "srt_buff"
-    #srt = srt_buff #[:npairs, :nsamples]
-    #print srt
-    #print srt.shape
-    """
+    print "running srt tests"
     testSRT()
-
-    comm =MPI.COMM_WORLD
-    
-    
-    exp = getTestExp(ngenes=200, nsamples=500)
-    gm = getGmap(100) 
-    d = Dirac(exp, device_id=comm.rank%2)
-    #d = Dirac(exp)
-    d.initExp()
-    #att = cuda.Context.get_device().get_attributes()
-    
-    for k,v in att.iteritems():
-        if str(k) == 'PCI_DEVICE_ID':
-            print comm.rank, v
-    for _ in range(160):
-        for i in range(10, 20):
-            gm = getGmap(10*i)
-            srt =  d.getSRT(gm)
-                
-        #print srt.shape
-        #print srt"""
-    
-
+    print "srt tests passed"
+    print "running rt tests"
+    testRT()
+    print "rt tests passed"
+    print "running rms tests"
+    testRMS()
+    print "rms tests pass"
