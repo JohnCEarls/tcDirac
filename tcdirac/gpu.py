@@ -107,8 +107,8 @@ class Dirac:
         self.b_size = b_size
         #init gpu
         drv = cuda
-        drv.init()
-        dev = drv.Device(device_id)
+        cuda.init()
+        dev = cuda.Device(device_id)
         ctx = dev.make_context()
         atexit.register(ctx.pop)
     
@@ -122,12 +122,12 @@ class Dirac:
         """
         try:
             old_r,old_c =  frm.shape
-            buff = np.zeros((new_r,new_c),dtype=b_dtype)
+            buff = cuda.pagelocked_zeros((new_r,new_c),b_dtype, mem_flags=cuda.host_alloc_flags.DEVICEMAP)#np.zeros((new_r,new_c),dtype=b_dtype)
             buff[:old_r,:old_c] = frm
         except ValueError:
             #oned
             old_r = frm.shape[0]
-            buff = np.zeros((new_r,),dtype=b_dtype)
+            buff = cuda.pagelocked_zeros((new_r,), b_dtype,mem_flags=cuda.host_alloc_flags.DEVICEMAP)# np.zeros((new_r,),dtype=b_dtype)
             buff[:old_r] = frm
         return buff
 
@@ -156,12 +156,14 @@ class Dirac:
 
         #put gene map on gpu
         gmap_buffer = self.getBuff(gmap, 2*(g_x_sz*b_size), 1,np.int32)
-        gmap_gpu = cuda.mem_alloc(gmap_buffer.nbytes)
-        cuda.memcpy_htod(gmap_gpu,gmap_buffer)
+        
+        gmap_gpu = np.intp(gmap_buffer.base.get_device_pointer()) #cuda.mem_alloc(gmap_buffer.nbytes)
+        #cuda.memcpy_htod(gmap_gpu,gmap_buffer)
 
         #make room for srt
         srt_shape = (g_x_sz*b_size , g_y_sz*b_size)
-        srt_gpu = cuda.mem_alloc(srt_shape[0]*srt_shape[1]*np.int32(1).nbytes)
+        srt_buffer = self.getBuff(np.zeros(srt_shape, dtype=np.int32),srt_shape[0],srt_shape[1], np.int32)
+        srt_gpu = np.intp(srt_buffer.base.get_device_pointer()) #cuda.mem_alloc(srt_shape[0]*srt_shape[1]*np.int32(1).nbytes)
 
         srtKern = self.getsrtKern()
         
@@ -176,7 +178,7 @@ class Dirac:
 
         srtKern(exp_gpu, nsamp, ngenes, gmap_gpu, npairs, srt_gpu, block=block, grid=grid)
 
-        gmap_gpu.free()
+        #gmap_gpu.free()
         
        
         if store_srt:
@@ -184,9 +186,9 @@ class Dirac:
             #transferring back and forth
             return (srt_gpu, npairs , nsamp)
         else:
-            srt_buffer = np.zeros(srt_shape, dtype=np.int32)
-            cuda.memcpy_dtoh(srt_buffer, srt_gpu)
-            srt_gpu.free()
+            #srt_buffer = np.zeros(srt_shape, dtype=np.int32)
+            #cuda.memcpy_dtoh(srt_buffer, srt_gpu)
+            #srt_gpu.free()
 
             return srt_buffer[:gmap.shape[0]/2,:self.exp.shape[1]]
             
@@ -207,18 +209,22 @@ class Dirac:
         """
 
         b_size = self.b_size
-        s_map_buff = np.array(s_map + [0 for i in range(srt_nsamp - len(s_map))],dtype=np.int32)
+        s_map_buff = cuda.pagelocked_zeros((srt_nsamp,), np.int32,  mem_flags=cuda.host_alloc_flags.DEVICEMAP)
 
-        s_map_gpu = cuda.mem_alloc(s_map_buff.nbytes)
-        cuda.memcpy_htod(s_map_gpu, s_map_buff)
+        s_map_buff[:len(s_map)] =  np.array(s_map,dtype=np.int32)
+
+        s_map_gpu = np.intp(s_map_buff.base.get_device_pointer())
+        #cuda.memcpy_htod(s_map_gpu, s_map_buff)
         
         #sample blocks
         g_y_sz = self.getGrid( srt_nsamp)
         #pair blocks
         g_x_sz = self.getGrid( srt_npairs )
         
-        block_rt_gpu = cuda.mem_alloc(int(g_y_sz*srt_npairs*(np.uint32(1).nbytes)) ) 
-        rt_gpu = cuda.mem_alloc(int(srt_npairs*(np.uint32(1).nbytes))) 
+        block_rt_gpu =  cuda.mem_alloc(int(g_y_sz*srt_npairs*(np.uint32(1).nbytes)) ) 
+
+        rt_buffer = cuda.pagelocked_zeros(srt_npairs, np.int32, mem_flags=cuda.host_alloc_flags.DEVICEMAP)
+        rt_gpu = np.intp(rt_buffer.base.get_device_pointer())
 
         grid = (g_x_sz, g_y_sz)
 
@@ -237,9 +243,9 @@ class Dirac:
             #transferring back and forth
             return (rt_gpu, srt_npairs)
         else:
-            rt_buffer = np.zeros((srt_npairs ,), dtype=np.int32)
-            cuda.memcpy_dtoh(rt_buffer, rt_gpu)
-            rt_gpu.free()
+            #rt_buffer = np.zeros((srt_npairs ,), dtype=np.int32)
+            #cuda.memcpy_dtoh(rt_buffer, rt_gpu)
+            #rt_gpu.free()
             return rt_buffer[:npairs]
 
     def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs):
@@ -253,8 +259,8 @@ class Dirac:
         """
         b_size = self.b_size
         gsize = int(padded_npairs/b_size)
-        result = np.zeros((gsize,), dtype=np.int32)
-        result_gpu = cuda.mem_alloc(result.nbytes)
+        result = cuda.pagelocked_empty((gsize,), dtype=np.int32, mem_flags=cuda.host_alloc_flags.DEVICEMAP)
+        result_gpu = np.intp(result.base.get_device_pointer()) #cuda.mem_alloc(result.nbytes)
          
         #result = np.empty((gsize,), dtype=np.int32)
         func = self.getrmsKern()
@@ -274,8 +280,9 @@ class Dirac:
         g_x_sz = self.getGrid( exp.shape[1] )
         exp_buffer = self.getBuff(exp,  exp.shape[0], g_x_sz*b_size, np.float32)
         
-        exp_gpu = cuda.mem_alloc(exp_buffer.nbytes)
-        cuda.memcpy_htod(exp_gpu, exp_buffer)
+        #exp_gpu = cuda.mem_alloc(exp_buffer.nbytes)
+        #cuda.memcpy_htod(exp_gpu, exp_buffer)
+        exp_gpu = np.intp(exp_buffer.base.get_device_pointer())
         self.exp_gpu = exp_gpu
 
 
@@ -323,7 +330,7 @@ class Dirac:
         Frees the expression gpu object 
         """
         if self.exp_gpu is not None:
-            self.exp_gpu.free()
+            #self.exp_gpu.free()
             self.exp_gpu = None
 
         
