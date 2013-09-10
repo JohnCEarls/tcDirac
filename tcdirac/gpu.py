@@ -63,6 +63,8 @@ class Kern:
 
 """
 
+    
+
     rms = """
         __global__ void rmsKernel( int * rt, int * srt, int sample_id, int padded_samples,  int true_npairs, int * result){
             extern __shared__ int s_srt[];
@@ -89,6 +91,34 @@ __global__ void rtKernel2( int * toReduce, int * final, int nsamples){
     final[g_pair] = nsamples/2 < count;
 }"""% '+'.join(['toReduce[%i*g_pair + %i]'%(nblocks,i) for i in range(nblocks)])
     return a
+
+
+def rtKern( neighbors, nsamples ):
+    base = """
+    __global__ void rtKernel1( int * srt,  int * sample_map, int * rt){
+        int samp_gid = blockIdx.x*blockDim.x + threadIdx.x;
+        int pair_gid = blockIdx.y*blockDim.y + threadIdx.y;
+        int neighbors = %i;
+        int nsamples = %i;
+        int sm_off = samp_gid*neighbors;    
+        
+        int count = 0;
+        %s;       
+        rt[ nsamples*pair_gid + samp_gid]   =  neighbors/2 < count;
+
+    }
+    """
+    str_map = [neighbors, nsamples]
+
+    temp= []
+   
+    for i in range(neighbors):
+        temp.append( "\tcount += srt[nsamples*pair_gid + sample_map[sm_off + %i ]];\n"%(i,) )
+
+    str_map.append(''.join(temp) )
+
+    return base % tuple(str_map)
+
 
 class Dirac:
     """
@@ -194,7 +224,7 @@ class Dirac:
             return srt_buffer[:gmap.shape[0]/2,:self.exp.shape[1]]
             
 
-    def getRT(self, s_map, srt_gpu, srt_nsamp, srt_npairs, npairs, store_rt=False):
+    def getRT(self, s_map, srt_gpu, srt_nsamp, srt_npairs, npairs,store_rt=False):
         """
         Computes the rank template
 
@@ -210,9 +240,13 @@ class Dirac:
         """
 
         b_size = self.b_size
-        s_map_buff = self.s_map_buff = cuda.pagelocked_zeros((int(srt_nsamp),), np.int32,  mem_flags=cuda.host_alloc_flags.DEVICEMAP)
+        
+        kneighbors = s_map.shape[0]
+        nsamp = s_map.shape[1]
 
-        s_map_buff[:len(s_map)] =  np.array(s_map,dtype=np.int32)
+        s_map_buff = self.s_map_buff = self.getBuff(s_map, int(kneighbors), int(srt_npairs), np.int32)
+
+     
 
         s_map_gpu = np.intp(s_map_buff.base.get_device_pointer())
         #cuda.memcpy_htod(s_map_gpu, s_map_buff)
@@ -222,21 +256,17 @@ class Dirac:
         #pair blocks
         g_x_sz = self.getGrid( srt_npairs )
         
-        block_rt_gpu =  cuda.mem_alloc(int(g_y_sz*srt_npairs*(np.uint32(1).nbytes)) ) 
+        rt_gpu =  cuda.mem_alloc(int(srt_nsamp*srt_npairs*(np.uint32(1).nbytes)) ) 
 
 
         grid = (g_x_sz, g_y_sz)
 
-        func1,func2 = self.getrtKern(g_y_sz)
+        func1 = self.getrtKern(kneighbors,srt_nsamp)
 
-        shared_size = b_size*b_size*np.uint32(1).nbytes
 
-        func1( srt_gpu, np.uint32(srt_nsamp), np.uint32(srt_npairs), s_map_gpu, block_rt_gpu, np.uint32(g_y_sz), block=(b_size,b_size,1), grid=grid, shared=shared_size)
+        func1( srt_gpu, s_map_gpu, rt_gpu, block=(b_size,b_size,1), grid=grid)
 
-        rt_buffer =self.rt_buffer = cuda.pagelocked_zeros((int(srt_npairs),), np.int32, mem_flags=cuda.host_alloc_flags.DEVICEMAP)
-        rt_gpu = np.intp(rt_buffer.base.get_device_pointer())
 
-        func2( block_rt_gpu, rt_gpu, np.int32(s_map_buff.sum()), block=(b_size,1,1), grid=(g_x_sz,))
 
         
         if store_rt:
@@ -244,10 +274,10 @@ class Dirac:
             #transferring back and forth
             return (rt_gpu, srt_npairs)
         else:
-            #rt_buffer = np.zeros((srt_npairs ,), dtype=np.int32)
-            #cuda.memcpy_dtoh(rt_buffer, rt_gpu)
+            rt_buffer = np.zeros((srt_npairs ,srt_nsamp), dtype=np.int32)
+            cuda.memcpy_dtoh(rt_buffer, rt_gpu)
             #rt_gpu.free()
-            return rt_buffer[:npairs]
+            return rt_buffer[:npairs,:nsamp]
 
     def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs):
         """
@@ -297,23 +327,18 @@ class Dirac:
             self.srtKern = func
         return self.srtKern
 
-    def getrtKern(self,nblocks):
+    def getrtKern(self,kneighbors,nsamples):
         """
         Returns the rank template kernel functions
         nblocks refers to the grid size for rt
         (func1,func2)
         func2 finishes the sum reduction
         """
-        if self.rt1Kern is None:
-            mod = SourceModule(Kern.rt1)
-            func1 = mod.get_function("rtKernel1")
-            self.rt1Kern = func1
+        mod = SourceModule(rtKern(kneighbors,nsamples))
+        func1 = mod.get_function("rtKernel1")
+        self.rt1Kern = func1
 
-        if nblocks not in self.rt2Kern:
-            mod = SourceModule(rtfinish(nblocks))
-            func2 = mod.get_function("rtKernel2")
-            self.rt2Kern[nblocks] = func2
-        return (self.rt1Kern, self.rt2Kern[nblocks])
+        return self.rt1Kern
 
     def getrmsKern(self):
         """
@@ -415,7 +440,8 @@ def testRT(timing=False):
     n=10
     gn = 3000
     ns = 10
-    for n in range(10,100,13):
+    neighbors = 5
+    for n in [500]:#range(100,500,10):
 
         samples = map(lambda x:'s%i'%x, range(n))
         genes = map(lambda x:'g%i'%x, range(gn))
@@ -430,7 +456,9 @@ def testRT(timing=False):
         d = Dirac(np_exp)
         d.initExp()
 
-        for ns in range(10,200,17):   
+        s_map = np.random.randint(low=0,high=len(samples), size=(neighbors, len(samples)))
+
+        for ns in range(50,200,1):   
             #print "testRT: num_samples[%i] net_size[%i]" % ( n, ns )
             test_start = time.time()
             ic = itertools.combinations
@@ -440,43 +468,39 @@ def testRT(timing=False):
                 gm_list += [g_d[g1],g_d[g2]]
             gm = np.array(gm_list, dtype=np.int32)
 
-            srt_start = time.time()
-            (srt_gpu, srt_npairs, srt_nsamp) = d.getSRT(gm,store_srt=True)
-            srt_end = time.time()
-            #print "srt [%f]" % (srt_end-srt_start)
-            s_map = []
-            for i in range(n):
-                if random.random() > .8:
-                    s_map.append(1)
-                else:
-                    s_map.append(0)
+        srt_start = time.time()
+        (srt_gpu, srt_npairs, srt_nsamp) = d.getSRT(gm,store_srt=True)
+        srt_end = time.time()
+        #print "srt [%f]" % (srt_end-srt_start)
 
-            #print s_map
-            rt_start = time.time()
-            rt = d.getRT(s_map, srt_gpu, srt_nsamp, srt_npairs, len(gm_list)/2) 
-            rt_end = time.time()
+        #print s_map
+        rt_start = time.time()
+  
+        rt = d.getRT(s_map, srt_gpu, srt_nsamp, srt_npairs,len(gm)/2)  
+        rt_end = time.time()
 
-            #print "rt [%f]" % (rt_end-rt_start)
-            #print rt
-            #srt_gpu.free()
-            res = pandas.Series( rt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
-            #print res
-            ctr = 0
-            if not timing:
-                for g1, g2 in  ic(net,2):
-                    if True or ctr < 1:
-                        mysum = 0
-                        for s,i in zip(exp.columns, s_map):
-                            if exp[s][g1] < exp[s][g2]:
-                                mysum += i 
-                        if sum(s_map)/2 < mysum:
-                            assert(res["%s < %s" % (g1,g2)] == 1)
-                        else:
-                            assert(res["%s < %s" % (g1,g2)] == 0)
-                        
-                    ctr += 1
-                test_end = time.time()
-                #print "test [%f]" % (test_end-test_start)
+        #print "rt [%f]" % (rt_end-rt_start)
+        #print rt
+        #srt_gpu.free()
+        """
+        res = pandas.Series( rt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
+        #print res
+        ctr = 0
+        if not timing:
+            for g1, g2 in  ic(net,2):
+                if True or ctr < 1:
+                    mysum = 0
+                    for s,i in zip(exp.columns, s_map):
+                        if exp[s][g1] < exp[s][g2]:
+                            mysum += i 
+                    if sum(s_map)/2 < mysum:
+                        assert(res["%s < %s" % (g1,g2)] == 1)
+                    else:
+                        assert(res["%s < %s" % (g1,g2)] == 0)
+                    
+                ctr += 1
+            test_end = time.time()
+            #print "test [%f]" % (test_end-test_start)"""
         
 
 
@@ -556,10 +580,10 @@ if __name__ == "__main__":
     import cProfile
     timing = False 
     print "running srt tests"
-    testSRT(timing)
+    #testSRT(timing)
     print "srt tests passed"
     print "running rt tests"
-    #testRT(timing)
+    testRT(timing)
     print "rt tests passed"
     print "running rms tests"
     #testRMS(timing)
