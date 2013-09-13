@@ -96,28 +96,22 @@ __global__ void rtKernel2( int * toReduce, int * final, int nsamples){
 def rtKern( neighbors, nsamples ):
     base = """
     __global__ void rtKernel1( int * srt,  int * sample_map, int * rt){
-        int samp_gid = blockIdx.x*blockDim.x + threadIdx.x;
-        int pair_gid = blockIdx.y*blockDim.y + threadIdx.y;
+        int pair_gid = blockIdx.x*blockDim.x + threadIdx.x;
+        int samp_gid = blockIdx.y*blockDim.y + threadIdx.y;
         int neighbors = %i;
         int nsamples = %i;
         int sm_off = samp_gid*neighbors;    
         
         int count = 0;
-        %s;       
-        rt[ nsamples*pair_gid + samp_gid]   =  neighbors/2 < count;
+        for(int i = 0; i<%i; i++){
+            count += srt[nsamples*pair_gid + sample_map[sm_off + i ]];
+        }
+        rt[ nsamples*pair_gid + samp_gid]   = neighbors/2 < count;
 
     }
     """
-    str_map = [neighbors, nsamples]
 
-    temp= []
-   
-    for i in range(neighbors):
-        temp.append( "\tcount += srt[nsamples*pair_gid + sample_map[sm_off + %i ]];\n"%(i,) )
-
-    str_map.append(''.join(temp) )
-
-    return base % tuple(str_map)
+    return base % (neighbors, nsamples, neighbors) 
 
 
 class Dirac:
@@ -154,6 +148,8 @@ class Dirac:
             frm[i,j] is out of bounds.
         """
         try:
+            print frm, new_r, new_c, b_dtype
+            print frm.shape
             old_r,old_c =  frm.shape
             buff = cuda.pagelocked_zeros((new_r,new_c),b_dtype, mem_flags=cuda.host_alloc_flags.DEVICEMAP)#np.zeros((new_r,new_c),dtype=b_dtype)
             buff[:old_r,:old_c] = frm
@@ -243,12 +239,13 @@ class Dirac:
         
         kneighbors = s_map.shape[0]
         nsamp = s_map.shape[1]
-
-        s_map_buff = self.s_map_buff = self.getBuff(s_map, int(kneighbors), int(srt_npairs), np.int32)
-
-     
+        print s_map.shape
+        s_map_buff = self.s_map_buff = self.getBuff(s_map, int(srt_nsamp), int(kneighbors), np.int32)
+        
+        print s_map_buff
 
         s_map_gpu = np.intp(s_map_buff.base.get_device_pointer())
+        
         #cuda.memcpy_htod(s_map_gpu, s_map_buff)
         
         #sample blocks
@@ -278,6 +275,7 @@ class Dirac:
             cuda.memcpy_dtoh(rt_buffer, rt_gpu)
             #rt_gpu.free()
             return rt_buffer[:npairs,:nsamp]
+
 
     def getRMS(self, rt_gpu, srt_gpu, padded_samples, padded_npairs, samp_id, npairs):
         """
@@ -334,12 +332,25 @@ class Dirac:
         (func1,func2)
         func2 finishes the sum reduction
         """
+        print rtKern(kneighbors,nsamples)
         mod = SourceModule(rtKern(kneighbors,nsamples))
         func1 = mod.get_function("rtKernel1")
         self.rt1Kern = func1
 
         return self.rt1Kern
 
+    def getrtKern2(self,kneighbors,nsamples):
+        """
+        Returns the rank template kernel functions
+        nblocks refers to the grid size for rt
+        (func1,func2)
+        func2 finishes the sum reduction
+        """
+        mod = SourceModule(rtKern2(kneighbors,nsamples))
+        func1 = mod.get_function("rtKernel1")
+        self.rt1Kern = func1
+
+        return self.rt1Kern
     def getrmsKern(self):
         """
         Returns the rank matching score kernel
@@ -409,6 +420,7 @@ def testSRT(timing=False):
                 exp.loc[g,s] = v
         """
         samples = exp.columns
+        res_index = []
         
         for ns in range(300):
             ic = itertools.combinations
@@ -416,32 +428,32 @@ def testSRT(timing=False):
             net = random.sample(genes,50) 
             for g1,g2 in ic(net,2):
                 gm_list += [g_d[g1],g_d[g2]]
+                res_index.append("%s < %s" % (g1,g2))
 
         gm = np.array(gm_list, dtype=np.int32)
         st = time.time()
         srt = d.getSRT(gm)
         n = time.time() - st
         cum += n
-        """
-            res = pandas.DataFrame( srt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)],columns=samples)
-            if not timing:
-                for i in res.index:
-                    g1,g2 = i.split(' < ')
-                    
-                    for s in samples:
-                        if res[s][i] == 1:
-                            assert exp[s][g1] < exp[s][g2], "does not match"
-                        else:
-                            assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)"""
+        res = pandas.DataFrame( srt,index=res_index,columns=samples)
+        if not timing:
+            for i in res.index:
+                g1,g2 = i.split(' < ')
+                
+                for s in samples:
+                    if res[s][i] == 1:
+                        assert exp[s][g1] < exp[s][g2], "does not match"
+                    else:
+                        assert exp[s][g1] >= exp[s][g2] or np.allclose([exp[s][g1]], [exp[s][g2]], .01) , "does not match[%f] [%f] [%s][%s]" % (exp[s][g1], exp[s][g2], g1, g2)
                     
                 
-    print cum
+    print "srt",cum
 def testRT(timing=False):
     n=10
-    gn = 3000
+    gn = 30
     ns = 10
     neighbors = 5
-    for n in [500]:#range(100,500,10):
+    for n in range(5,51,50):
 
         samples = map(lambda x:'s%i'%x, range(n))
         genes = map(lambda x:'g%i'%x, range(gn))
@@ -453,20 +465,27 @@ def testRT(timing=False):
         for i,gene in enumerate(genes):
             g_d[gene] = i 
         samples = exp.columns
-        d = Dirac(np_exp)
+        d = Dirac(np_exp,device_id=0, b_size=4)
         d.initExp()
-
-        s_map = np.random.randint(low=0,high=len(samples), size=(neighbors, len(samples)))
-
-        for ns in range(50,200,1):   
+        
+        s_map = np.random.randint(low=0,high=len(samples), size=(neighbors, len(samples))).astype(np.int32)
+        np.save('s_map',s_map)
+        rt1_cum = 0.0
+        rt2_cum = 0.0
+        res_index = []
+        gm_list = []
+        test_res = {}
+        for ns in range(10,100,1):   
             #print "testRT: num_samples[%i] net_size[%i]" % ( n, ns )
             test_start = time.time()
             ic = itertools.combinations
-            gm_list = []
             net = random.sample(genes,ns) 
             for g1,g2 in ic(net,2):
-                gm_list += [g_d[g1],g_d[g2]]
-            gm = np.array(gm_list, dtype=np.int32)
+                if "%s < %s" % (g1,g2) not in test_res:
+                    gm_list += [g_d[g1],g_d[g2]]
+                    res_index.append( "%s < %s" % (g1,g2) )
+                    test_res[ "%s < %s" % (g1,g2)] = 1
+        gm = np.array(gm_list, dtype=np.int32)
 
         srt_start = time.time()
         (srt_gpu, srt_npairs, srt_nsamp) = d.getSRT(gm,store_srt=True)
@@ -475,32 +494,68 @@ def testRT(timing=False):
 
         #print s_map
         rt_start = time.time()
-  
+             
         rt = d.getRT(s_map, srt_gpu, srt_nsamp, srt_npairs,len(gm)/2)  
         rt_end = time.time()
+        rt2_cum += rt_end - rt_start
+
+            
 
         #print "rt [%f]" % (rt_end-rt_start)
         #print rt
         #srt_gpu.free()
-        """
-        res = pandas.Series( rt,index=["%s < %s" % (g1,g2) for g1, g2 in  ic(net,2)])
+        
+        res = pandas.DataFrame(rt,index=res_index, columns=exp.columns)
+        #res.to_csv('test.csv')
+        #res.save('test.pkl')
+        #exp.to_csv('exp.csv')
+        #exp.save('exp.pkl')
         #print res
         ctr = 0
         if not timing:
-            for g1, g2 in  ic(net,2):
-                if True or ctr < 1:
+            for i in  range(len(res_index)):
+                for j,samp in enumerate(exp.columns):
                     mysum = 0
-                    for s,i in zip(exp.columns, s_map):
-                        if exp[s][g1] < exp[s][g2]:
-                            mysum += i 
-                    if sum(s_map)/2 < mysum:
-                        assert(res["%s < %s" % (g1,g2)] == 1)
+                    g1, g2 = res_index[i].split(' < ')
+                    matching = s_map[j,:]
+                    for q in matching:
+                        if exp[exp.columns[q]][g1] < exp[exp.columns[q]][g2]:
+                            mysum += 1
+                    if 2.5 < mysum:
+                        try:
+                            assert(res[samp]["%s < %s" % (g1,g2)] == 1)
+                        except:
+                            print "*"*20
+                            print "mysum",mysum
+                            print "neigh",neighbors
+                            print "%s < %s" % (g1,g2)
+                            print "res",res[samp]["%s < %s" % (g1,g2)] 
+                            print matching
+                            print exp.loc[[g1,g2]][matching]
+                            print i
+                            print j
+                            raise
                     else:
-                        assert(res["%s < %s" % (g1,g2)] == 0)
+                        try:
+                            assert(res[samp]["%s < %s" % (g1,g2)] == 0)
+                        except:
+                            print "*"*20
+                            print "res",res[samp]["%s < %s" % (g1,g2)] 
+                            print "mysum",mysum
+                            print "neigh",neighbors
+                            print "%s < %s" % (g1,g2)
+                            print matching
+                            print exp.loc[[g1,g2]][matching]
+                            print i
+                            print j
+                            raise
                     
                 ctr += 1
             test_end = time.time()
             #print "test [%f]" % (test_end-test_start)"""
+        print "nsamples", n
+        print "rt1", rt1_cum/n
+        print "rt2", rt2_cum/n
         
 
 
@@ -521,7 +576,7 @@ def testRMS(timing=False):
         for i,gene in enumerate(genes):
             g_d[gene] = i 
         samples = exp.columns
-        d = Dirac(np_exp)
+        d = Dirac(np_exp, b_size=16)
         d.initExp()
 
         for ns in range(3,200,17):   
