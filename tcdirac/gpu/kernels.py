@@ -40,6 +40,21 @@ def rt( neighbors, nsamples ):
 
     return base
 
+def rms( nsamples, nnets ):
+    base = """
+    __global__ void rmsKernel( int * rt, int * srt,  int * net_map, float * rms){
+        int net =  blockIdx.x*blockDim.x + threadIdx.x;
+        int sample = blockIdx.y*blockDim.y + threadIdx.y;
+        int counter = 0;
+        for( int i=net_map[2*net]; i< net_map[2*net + 1]; i++){
+            counter += rt[%i * i + sample] == srt[%i * i + sample]
+        }
+        if (counter > 0){//counter == 0 if net is in the buffer zone
+            rms[net*%i + sample ] = (float)counter/(float)(net_map[2*net] - net_map[2*net]);
+        }
+
+    } """ % (nsamples, nsamples, nnets)
+
 
 if __name__ == "__main__":
     print srt(10)

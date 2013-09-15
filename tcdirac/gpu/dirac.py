@@ -2,7 +2,7 @@ debug = True
 int32 = 4
 import kernels
 from pycuda.compiler import SourceModule
-
+import pycuda.driver as cuda
 def sampleRankTemplate( exp_gpu, gmap_gpu, nsamp, npairs, b1_size, b2_size ):
     """
     nsamp  is the columns dim (shape[1]) of exp_gpu
