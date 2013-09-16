@@ -11,7 +11,7 @@ def srt(nsamples):
         float gene_1_exp = d_expression[gm1*%i + sample];
 
         float gene_2_exp = d_expression[gm2*%i + sample];
-        srt[%i*g_pair + sample] = (int)(gene_1_exp < gene_2_exp);
+        srt[%i*g_pair + sample] = gene_1_exp < gene_2_exp;
     }
 
 
@@ -46,17 +46,24 @@ def rms( nsamples, nnets ):
         int net =  blockIdx.x*blockDim.x + threadIdx.x;
         int sample = blockIdx.y*blockDim.y + threadIdx.y;
         int counter = 0;
-        for( int i=net_map[2*net]; i< net_map[2*net + 1]; i++){
-            counter += rt[%i * i + sample] == srt[%i * i + sample]
+        int nm_start = net_map[net];
+        int nm_end = net_map[net+1];
+
+        for( int i=nm_start; i< nm_end; i++){
+            counter += rt[%i * i + sample] == srt[%i * i + sample];
         }
         if (counter > 0){//counter == 0 if net is in the buffer zone
-            rms[net*%i + sample ] = (float)counter/(float)(net_map[2*net] - net_map[2*net]);
+            rms[net*%i + sample ] = (float)counter/(float)(nm_end - nm_start);
         }
 
-    } """ % (nsamples, nsamples, nnets)
+    } """ % (nsamples, nsamples, nsamples)
+
+    return base
 
 
 if __name__ == "__main__":
     print srt(10)
 
     print rt(5, 10)
+
+    print rms(10, 10)

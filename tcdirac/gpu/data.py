@@ -23,7 +23,7 @@ class Expression:
         self.orig_data = np_data
 
     
-    def createBuffer(self, sample_block_size, dtype=np.int32):
+    def createBuffer(self, sample_block_size, dtype=np.float32):
         """
         create buffer with sample sizes appropriately adjusted
         """
@@ -34,10 +34,10 @@ class Expression:
         self.buffer_ngenes = self.orig_ngenes
         self.buffer_nsamples = nblocks * sample_block_size
 
-        d = self.buffer_data = np.zeros((self.buffer_ngenes, self.buffer_nsamples), dtype=np.int32)
-        d[:, :ns] = self.orig_data[:,:]
+        d = self.buffer_data = np.zeros((self.buffer_ngenes, self.buffer_nsamples), dtype=dtype)
+        self.buffer_data[:, :ns] = self.orig_data[:,:]
 
-    def toGPU(self, sample_block_size, dtype=np.int32):
+    def toGPU(self, sample_block_size, dtype=np.float32):
         if self.buffer_data is None:
             self.createBuffer( sample_block_size, dtype)
         self.gpu_data = cuda.mem_alloc(self.buffer_data.nbytes)
@@ -80,7 +80,7 @@ class SampleRankTemplate:
 
 class RankTemplate(SampleRankTemplate):
     def __init__(self, nsamples, npairs):
-        super(SampleRankTemplate, self).__init__(nsamples,npairs)
+        SampleRankTemplate.__init__(self, nsamples,npairs)
 
     
 class GeneMap:
@@ -147,12 +147,11 @@ class NetworkMap:
        
         self.gpu_data = None
 
-    def createBuffer(self, nnets_block_size, buff_dtype=np.int32)
+    def createBuffer(self, nnets_block_size, buff_dtype=np.int32):
         nbs = int(math.ceil(float(self.orig_nnets)/nnets_block_size))
         self.buffer_nnets = nbs*nnets_block_size
-        self.buffer_data = np.zeros( (self.buffer_nnets+1,) dtype=buff_dtype)
-
-        self.buffer_data[:len(orig_data)] = self.orig_data[:]
+        self.buffer_data = np.zeros( (self.buffer_nnets+1,), dtype=buff_dtype)
+        self.buffer_data[:len(self.orig_data)] = self.orig_data[:]
 
         
     def toGPU(self, nets_block_size, buff_dtype = np.int32):
@@ -174,19 +173,20 @@ class RankMatchingScores:
         self.gpu_data = None
 
     def createBuffer(self, samples_block_size, nets_block_size, buff_dtype=np.float32):
-        self.buffer_nsamples = int(math.ceil(float(self.nsamples)/samples_block_size))* samples_block_size
-        self.buffer_nnets = int(math.ceil(float(res_nnets)/nets_block_size)*nets_block_size
+        self.buffer_nsamples = int(math.ceil(float(self.res_nsamples)/samples_block_size))* samples_block_size
+        self.buffer_nnets = int(math.ceil(float(self.res_nnets)/nets_block_size))*nets_block_size
         self.buffer_data = np.zeros( (self.buffer_nnets, self.buffer_nsamples), dtype=buff_dtype)
 
    
     def toGPU(self,  samples_block_size, nets_block_size, buff_dtype=np.float32):
         if self.buffer_data is None:
             self.createBuffer( samples_block_size, nets_block_size, buff_dtype=np.float32)
-        self.gpu_data = cuda.mem_alloc( self.buffer_data.nbyte )
+        self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
 
 
-    def fromGPU(self):
+    def fromGPU(self, res_dtype=np.double):
         cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
+        self.res_data = np.empty(( self.res_nnets, self.res_nsamples), dtype = res_dtype)
         self.res_data[:,:] = self.buffer_data[:self.res_nnets, :self.res_nsamples]
 
 
@@ -197,6 +197,11 @@ if __name__ == "__main__":
     cuda.init()
     n = 200
     gn = 1000
+    nets = 20
+    sample_block_size = 32
+    npairs_block_size = 16
+    nets_block_size = 8
+
     b2_size = 32
     genes = map(lambda x:'g%i'%x, range(gn))
     samples = map(lambda x:'s%i'%x, range(n))
@@ -206,24 +211,37 @@ if __name__ == "__main__":
     ctx = dev.make_context()
 
     e = Expression( exp.values )
-    e.toGPU(b2_size)
+    e.toGPU(sample_block_size)
 
-    assert e.buffer_nsamples%b2_size == 0
+    assert e.buffer_nsamples%sample_block_size == 0
 
     srt = SampleRankTemplate(len(samples), 200)
-    srt.toGPU( 32, 16)
+    srt.toGPU( sample_block_size, npairs_block_size )
     srt.fromGPU()
     print srt.res_data
 
+    rt = RankTemplate(len(samples), 200)
+    rt.toGPU( sample_block_size, npairs_block_size )
+    rt.fromGPU()
+    assert rt.res_data.shape == srt.res_data.shape
+
+    
+    nm_orig = np.array(range(0, 200,10))
+    
+    nm = NetworkMap(nm_orig )
+    nm.toGPU( nets_block_size )
+    
+
     gm = GeneMap( np.array(range(1000)))
-    gm.toGPU(16)
+    gm.toGPU(nets_block_size )
     print gm.buffer_data[:20]
 
     s_map = np.random.randint(low=0,high=len(samples), size=(len(samples),5 )).astype(np.int32)
     for i in range(s_map.shape[0]):
         s_map[i,0] = i
     sm = SampleMap(s_map)
-    sm.toGPU(32)
+    sm.toGPU( sample_block_size )
+
     print sm.buffer_data
 
 
