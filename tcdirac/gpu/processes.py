@@ -32,6 +32,20 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
 
     return (srt, rt, rms)
 
+def testDirac(expression_matrix, gene_map, sample_map, network_map):
+    srt = np.zeros((gene_map.shape[0]/2, expression_matrix.shape[1]))
+    for i in range(expression_matrix.shape[1]):
+        for j in range(gene_map.shape[0]/2):
+            g1 = gene_map[2*j]
+            g2 = gene_map[2*j +  1]
+            if expression_matrix[g1,i] < expression_matrix[g2,i]:
+                srt[j,i] = 1
+            else:
+                srt[j,i] = 0
+    return srt
+
+            
+
 if __name__ == "__main__":
     import numpy as np
     import pandas
@@ -46,9 +60,10 @@ if __name__ == "__main__":
     ctx = dev.make_context()
 
 
-    n = 500
+    n = 50
     gn = 10000
     neighbors =  10
+    nnets = 20
 
     samples = map(lambda x:'s%i'%x, range(n))
     genes = map(lambda x:'g%i'%x, range(gn))
@@ -62,7 +77,7 @@ if __name__ == "__main__":
 
     net_map = [0]
    
-    for i in range(250):
+    for i in range(nnets):
         n_size = random.randint(5, 50)
         net_map.append(net_map[-1] + scipy.misc.comb(n_size,2, exact=1))
         net = random.sample(genes,n_size)
@@ -93,3 +108,6 @@ if __name__ == "__main__":
     rms.fromGPU()
     print rms.res_data[:10,:10]
     ctx.pop()
+    test_srt = testDirac(expression_matrix, gene_map, sample_map, network_map)
+
+    print np.allclose(srt.res_data, test_srt)
