@@ -52,7 +52,6 @@ def rankMatchingScores( srt_gpu, rt_gpu, rms_gpu, nmap_gpu, nsamples, nnets, sam
     grid = ( nnets/nets_block_size, nsamples/sample_block_size)
 
     kernel_source = kernels.rms( nsamples, nnets )
-    print kernel_source
     mod = SourceModule( kernel_source )
     func = mod.get_function('rmsKernel')
     

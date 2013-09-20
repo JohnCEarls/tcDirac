@@ -32,7 +32,7 @@ def rt( neighbors, nsamples ):
         for(int i = 0; i<%i; i++){
             count += srt[%i*pair_gid + sample_map[sm_off + i ]];
         }
-        rt[ %i*pair_gid + samp_gid]   = %i < count;
+        rt[ %i*pair_gid + samp_gid]   =  %i < count;
 
     }
     """ % (neighbors, neighbors, nsamples, nsamples, neighbors/2)
@@ -52,7 +52,7 @@ def rms( nsamples, nnets ):
         for( int i=nm_start; i< nm_end; i++){
             counter += rt[%i * i + sample] == srt[%i * i + sample];
         }
-        if (counter > 0){//counter == 0 if net is in the buffer zone
+        if (nm_end-nm_start > 0){//counter == 0 if net is in the buffer zone
             rms[net*%i + sample ] = (float)counter/(float)(nm_end - nm_start);
         }
 

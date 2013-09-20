@@ -16,6 +16,12 @@ class Expression:
             self.setData(exp_data)
 
         
+    def gpu_mem(self, sample_block_size, dtype=np.float32):
+        if self.buffer_data is not None:
+            return self.buffer_data.nbytes
+        else:
+            bsamp = int(math.ceil(float(self.orig_nsamples)/sample_block_size))*sample_block_size
+            return bsamp*dtype(1).nbytes*self.orig_ngenes
 
     def setData(self, np_data):
         self.orig_nsamples = np_data.shape[1]
@@ -29,10 +35,11 @@ class Expression:
         """
 
         ns = self.orig_nsamples
+        """
         nblocks = ns/sample_block_size 
-        if ns%sample_block_size: nblocks += 1
+        if ns%sample_block_size: nblocks += 1"""
         self.buffer_ngenes = self.orig_ngenes
-        self.buffer_nsamples = nblocks * sample_block_size
+        self.buffer_nsamples =int(math.ceil(float(ns)/sample_block_size))*sample_block_size
 
         d = self.buffer_data = np.zeros((self.buffer_ngenes, self.buffer_nsamples), dtype=dtype)
         self.buffer_data[:, :ns] = self.orig_data[:,:]
@@ -57,14 +64,30 @@ class SampleRankTemplate:
         
         self.gpu_data = None
 
+        
+    def gpu_mem(self, sample_block_size, pairs_block_size, dtype=np.int32):
+        if self.buffer_data is not None:
+            return self.buffer_data.nbytes
+        else:
+
+            bns = int(math.ceil(float(self.res_nsamples)/sample_block_size))
+
+            bnp =  int(math.ceil(float(self.res_npairs)/pairs_block_size))
+            return  bns*sample_block_size* bnp*pairs_block_size*dtype(1).nbytes
+
+
+
     def toGPU(self, sample_block_size, pairs_block_size, buff_dtype=np.int32):
         self.buffer_dtype = buff_dtype
 
-        bns = self.res_nsamples/sample_block_size
-        if bns%sample_block_size: bns += 1
+        #bns = self.res_nsamples/sample_block_size
+        #if bns%sample_block_size: bns += 1
 
-        bnp = self.res_npairs/pairs_block_size
-        if bnp%pairs_block_size: bnp += 1
+        bns = int(math.ceil(float(self.res_nsamples)/sample_block_size))
+
+        #bnp = self.res_npairs/pairs_block_size
+        #if bnp%pairs_block_size: bnp += 1
+        bnp =  int(math.ceil(float(self.res_npairs)/pairs_block_size))
         
         self.buffer_nsamples = bns*sample_block_size
         self.buffer_npairs = bnp*pairs_block_size
@@ -93,6 +116,11 @@ class GeneMap:
 
         self.gpu_data = None
 
+    def gpu_mem(self, pairs_block_size, dtype=np.int32):
+
+        pbs = int(math.ceil(float(self.orig_npairs)/pairs_block_size))
+        return 2*pbs*pairs_block_size*dtype(1).nbytes
+
     def createBuffer(self, pairs_block_size, buff_dtype=np.int32):
         pbs = int(math.ceil(float(self.orig_npairs)/pairs_block_size))
         self.buffer_npairs = pbs*pairs_block_size
@@ -115,6 +143,12 @@ class SampleMap:
         self.buffer_kneighbors = None
         self.buffer_nsamples = None
         self.buffer_data = None
+
+    def gpu_mem(self, samples_block_size, dtype=np.int32):
+        sbs = int(math.ceil(float(self.orig_nsamples)/samples_block_size))
+
+        return sbs*samples_block_size*self.orig_kneighbors*dtype(1).nbytes
+
 
     def createBuffer(self, samples_block_size, buff_dtype=np.int32):
         sbs = int(math.ceil(float(self.orig_nsamples)/samples_block_size))
@@ -147,6 +181,11 @@ class NetworkMap:
        
         self.gpu_data = None
 
+    def gpu_mem(self, nnets_block_size, dtype=np.int32):
+        nbs = int(math.ceil(float(self.orig_nnets)/nnets_block_size))
+        return nbs*(nnets_block_size+1)*dtype(1).nbytes
+
+
     def createBuffer(self, nnets_block_size, buff_dtype=np.int32):
         nbs = int(math.ceil(float(self.orig_nnets)/nnets_block_size))
         self.buffer_nnets = nbs*nnets_block_size
@@ -171,6 +210,11 @@ class RankMatchingScores:
         self.buffer_data = None
 
         self.gpu_data = None
+
+    def gpu_mem(self, samples_block_size, nets_block_size, dtype=np.float32):
+        a = int(math.ceil(float(self.res_nsamples)/samples_block_size))* samples_block_size
+        b = int(math.ceil(float(self.res_nnets)/nets_block_size))*nets_block_size
+        return a*b*dtype(1).nbytes
 
     def createBuffer(self, samples_block_size, nets_block_size, buff_dtype=np.float32):
         self.buffer_nsamples = int(math.ceil(float(self.res_nsamples)/samples_block_size))* samples_block_size
@@ -197,54 +241,63 @@ if __name__ == "__main__":
     cuda.init()
     n = 200
     gn = 1000
-    nets = 20
+    nets = 5 
     sample_block_size = 32
     npairs_block_size = 16
     nets_block_size = 8
+    for n in range(100,2000,100):
+        dev = cuda.Device(1)
+        ctx = dev.make_context()
+        init_free, total = cuda.mem_get_info()
+        b2_size = 32
+        genes = map(lambda x:'g%i'%x, range(gn))
+        samples = map(lambda x:'s%i'%x, range(n))
+        exp = pandas.DataFrame(np.random.rand(len(genes),len(samples)), index=genes, columns=samples)
 
-    b2_size = 32
-    genes = map(lambda x:'g%i'%x, range(gn))
-    samples = map(lambda x:'s%i'%x, range(n))
-    exp = pandas.DataFrame(np.random.rand(len(genes),len(samples)), index=genes, columns=samples)
-
-    dev = cuda.Device(0)
-    ctx = dev.make_context()
-
-    e = Expression( exp.values )
-    e.toGPU(sample_block_size)
-
-    assert e.buffer_nsamples%sample_block_size == 0
-
-    srt = SampleRankTemplate(len(samples), 200)
-    srt.toGPU( sample_block_size, npairs_block_size )
-    srt.fromGPU()
-    print srt.res_data
-
-    rt = RankTemplate(len(samples), 200)
-    rt.toGPU( sample_block_size, npairs_block_size )
-    rt.fromGPU()
-    assert rt.res_data.shape == srt.res_data.shape
-
-    
-    nm_orig = np.array(range(0, 200,10))
-    
-    nm = NetworkMap(nm_orig )
-    nm.toGPU( nets_block_size )
-    
-
-    gm = GeneMap( np.array(range(1000)))
-    gm.toGPU(nets_block_size )
-    print gm.buffer_data[:20]
-
-    s_map = np.random.randint(low=0,high=len(samples), size=(len(samples),5 )).astype(np.int32)
-    for i in range(s_map.shape[0]):
-        s_map[i,0] = i
-    sm = SampleMap(s_map)
-    sm.toGPU( sample_block_size )
-
-    print sm.buffer_data
+        
+        pred_used = 0
+        e = Expression( exp.values )
+        pred_used += e.gpu_mem(sample_block_size, dtype=np.float32)
+        
+        e.toGPU(sample_block_size)
 
 
-    ctx.pop()
+        srt = SampleRankTemplate(len(samples),111776 )
+
+        pred_used += srt.gpu_mem( sample_block_size, npairs_block_size, dtype=np.float32)
+        srt.toGPU( sample_block_size, npairs_block_size )
+        srt.fromGPU()
+
+        rt = RankTemplate(len(samples), 111776)
+        rt.toGPU( sample_block_size, npairs_block_size )
+        rt.fromGPU()
+        pred_used += rt.gpu_mem( sample_block_size, npairs_block_size, dtype=np.int32)
+
+        nm_orig = np.array(range(0, 200,1))
+        
+        nm = NetworkMap(nm_orig )
+        nm.toGPU( nets_block_size )
+        pred_used += nm.gpu_mem( nets_block_size )
+
+        
+        gm = GeneMap( np.array(range(1000)))
+        gm.toGPU(nets_block_size )
+
+        pred_used += nm.gpu_mem( nets_block_size )
+
+        s_map = np.random.randint(low=0,high=len(samples), size=(len(samples),5 )).astype(np.int32)
+        for i in range(s_map.shape[0]):
+            s_map[i,0] = i
+        sm = SampleMap(s_map)
+        sm.toGPU( sample_block_size )
+        pred_used += sm.gpu_mem( sample_block_size )
+
+        final_free, total = cuda.mem_get_info() 
+        print "actual",init_free - final_free
+        print "pred",pred_used
+        print "ratio",float(pred_used)/ (init_free - final_free)
+
+
+        ctx.pop()
 
         
