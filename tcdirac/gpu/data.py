@@ -165,6 +165,35 @@ class SampleMap:
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod( self.gpu_data, self.buffer_data )
 
+class SampleMapBin:
+    """
+    Sample map for binary dirac (i.e. 1-d vector of 1s and 0s)
+    """
+    def __init__(self, orig_smap):
+        self.orig_nsamples = orig_smap.shape[0]
+        self.orig_data = orig_smap
+
+        self.buffer_nsamples = None
+        self.buffer_data = None
+
+    def gpu_mem(self, samples_block_size, dtype=np.int32):
+        sbs = int(math.ceil(float(self.orig_nsamples)/samples_block_size))
+        return sbs*samples_block_size*dtype(1).nbytes
+
+    def createBuffer(self, samples_block_size, buff_dtype=np.int32):
+        b_size = self.gpu_mem(samples_block_size, buff_dtype)
+        self.buffer_nsamples = b_size/buff_dtype(1).nbytes
+        self.buffer_data((self.buffer_nsamples,), dtype=buff_dtype)
+        self.buffer_data[:self.orig_nsamples] = self.orig_samples[:]
+        
+
+    def toGPU(self,  samples_block_size, buff_dtype=np.int32):
+       
+        if self.buffer_data is None:
+            self.createBuffer( samples_block_size, buff_dtype)
+        self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
+        cuda.memcpy_htod( self.gpu_data, self.buffer_data )
+
 
 class NetworkMap:
     """
