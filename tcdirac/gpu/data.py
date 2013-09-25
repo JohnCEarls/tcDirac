@@ -1,4 +1,5 @@
 import numpy as np
+import bisect
 import pycuda.driver as cuda
 import math
 class Expression:
@@ -96,10 +97,11 @@ class SampleRankTemplate:
         
 
     def fromGPU(self, res_dtype=np.double):
-        self.buffer_data = np.empty((self.buffer_npairs,self.buffer_nsamples), dtype = self.buffer_dtype)
-        cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
-        self.res_data = np.empty((self.res_npairs, self.res_nsamples), dtype=res_dtype)
-        self.res_data[:,:] = self.buffer_data[:self.res_npairs, :self.res_nsamples]
+        if self.gpu_data is not None:
+            self.buffer_data = np.empty((self.buffer_npairs,self.buffer_nsamples), dtype = self.buffer_dtype)
+            cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
+            self.res_data = np.empty((self.res_npairs, self.res_nsamples), dtype=res_dtype)
+            self.res_data[:,:] = self.buffer_data[:self.res_npairs, :self.res_nsamples]
 
 class RankTemplate(SampleRankTemplate):
     def __init__(self, nsamples, npairs):
@@ -132,6 +134,14 @@ class GeneMap:
             self.createBuffer( pairs_block_size, buff_dtype)
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod(self.gpu_data, self.buffer_data)
+
+    def split(self,partition_point):
+        data_1 = self.orig_data[:partition_point*2].copy()
+        data_2 = self.orig_data[partition_point*2:].copy()
+        gm1 = GeneMap(data_1)
+        gm2 = GeneMap(data_2)
+
+        return (gm1,gm2)
 
         
 class SampleMap:
@@ -228,6 +238,26 @@ class NetworkMap:
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod(self.gpu_data, self.buffer_data)
 
+    def split(self):
+        
+        center = bisect.bisect(self.orig_data, self.orig_data[-1]/2)
+        if center == len(self.orig_data) - 1:
+            center -= 1
+        assert 0 < center < len(self.orig_data)
+        if center == len(self.orig_data) - 1:
+            center -= 1
+        part = self.orig_data[center]
+        new_1 = self.orig_data[:center+1].copy()
+        new_2 = self.orig_data[center:].copy()
+        new_2 =  new_2 - part
+
+        nm1 = NetworkMap(new_1)
+        nm2 = NetworkMap(new_2)
+
+        return (part, nm1, nm2)
+
+        
+
 class RankMatchingScores:
     def __init__(self, num_nets, nsamples):
         self.res_data = None
@@ -258,11 +288,10 @@ class RankMatchingScores:
 
 
     def fromGPU(self, res_dtype=np.double):
-        cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
-        self.res_data = np.empty(( self.res_nnets, self.res_nsamples), dtype = res_dtype)
-        self.res_data[:,:] = self.buffer_data[:self.res_nnets, :self.res_nsamples]
-
-
+        if self.gpu_data is not None:
+            cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
+            self.res_data = np.empty(( self.res_nnets, self.res_nsamples), dtype = res_dtype)
+            self.res_data[:,:] = self.buffer_data[:self.res_nnets, :self.res_nsamples]
         
 if __name__ == "__main__":
     import pandas
