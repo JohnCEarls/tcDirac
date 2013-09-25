@@ -2,6 +2,9 @@ import dirac
 import data
 import pycuda as cuda
 import numpy as np
+from pycuda._driver import MemoryError
+import logging 
+
 def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,rms_only=False ):
     exp = data.Expression( expression_matrix )
 
@@ -19,9 +22,10 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
 
     req_mem = reqMemory(exp, rms,np,rt,sm,srt,gm,nm, sample_block_size, nets_block_size, npairs_block_size )
     
-    print "Req. Mem[%f], Avail. Mem[%f]" % (float(req_mem)/(2**30), float(cuda.mem_get_info()[0])/2**30)
+    logging.info( "Req. Mem[%f], Avail. Mem[%f]" % (float(req_mem)/(2**30), float(cuda.mem_get_info()[0])/2**30) )
 
-    if req_mem > cuda.mem_get_info()[0]*.9 :
+    if req_mem > cuda.mem_get_info()[0]*.95: #if we can split without error, lets
+        logging.info("Splitting data from calculation")
         return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
 
     try:
@@ -32,9 +36,14 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
         sm.toGPU( sample_block_size )
         srt.toGPU( sample_block_size, npairs_block_size )
         gm.toGPU( npairs_block_size )
-    except:
-        print "Not enough Memory and missed the calc"
-        raise
+    except MemoryError:
+        #we ran out of memory, maybe dev memory changed, in any case, split
+        print "*************MemoryERROR*********************"
+        logging.info("Splitting data from MemoryError")
+        for d in [exp,rms, nm, rt, sm, srt, gm]:
+            if d.gpu_data is not None:
+                d.gpu_data.free()
+        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
 
     dirac.sampleRankTemplate( exp.gpu_data, gm.gpu_data, srt.gpu_data, exp.buffer_nsamples, gm.buffer_npairs, npairs_block_size, sample_block_size)
     
@@ -59,6 +68,7 @@ def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_blo
     nm = data.NetworkMap( network_map )
     part_point,nm1,nm2 = nm.split()
     gm1,gm2 = gm.split(part_point)
+    logging.info("Running first split")
     srt1, rt1, rms1 = runDirac( expression_matrix, gm1.orig_data, sample_map, nm1.orig_data, sample_block_size, npairs_block_size, nets_block_size, rms_only )
     if rms_only:
         srt1 = None
@@ -75,7 +85,7 @@ def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_blo
                 d.gpu_data.free()
             d.buffer_data = None
             d.gpu_data = None
-
+    logging.info("Running second split")
     srt2,rt2,rms2 = runDirac( expression_matrix, gm2.orig_data, sample_map, nm2.orig_data, sample_block_size, npairs_block_size, nets_block_size,rms_only )
 
     if rms_only:
@@ -94,7 +104,7 @@ def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_blo
             d.buffer_data = None
             d.gpu_data = None
 
-
+    logging.info("Joining Splits")
     if rms_only:
         srt = None
         rt = None

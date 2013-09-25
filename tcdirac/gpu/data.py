@@ -153,6 +153,8 @@ class SampleMap:
         self.buffer_kneighbors = None
         self.buffer_nsamples = None
         self.buffer_data = None
+    
+        self.gpu_data = None
 
     def gpu_mem(self, samples_block_size, dtype=np.int32):
         sbs = int(math.ceil(float(self.orig_nsamples)/samples_block_size))
