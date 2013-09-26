@@ -18,6 +18,8 @@ import random
 from boto.s3.key import Key
 import boto
 import copy
+import pycuda.driver as cuda
+from gpu import processes
 class Worker:
     """
     tcdirac worker class
@@ -426,9 +428,290 @@ class Worker:
         return None
         
 
+class GPUNode:
+    MASTER,READY,PREPARING,RUNNING,COMPLETE,ERROR = range(6)
+    def __init__(self, host_name, host_comm, host_map):
+
+        cuda.init()
+        self.host = host_name
+        self.world_comm = MPI.COMM_WORLD
+        self.host_comm = host_comm
+        self.host_map = host_map 
+        self.world_master = 0
+
+class GPUWorker(GPUNode):
+    def __init__(self, host_name, host_comm, host_map):
+        GPUNode.__init__(self, host_name, host_comm,host_map)
+        self.state = GPUNode.READY
+
+    def _init_host(self):
+        eb = np.empty((1,))
+        na = np.array
+
+        self.host_comm.Gather(na([self.world_comm.rank]),eb)
+        self.host_comm.Gather(na([self.state]),eb)
+
+
+
+    
+class GPUMaster(GPUNode):
+    #GPU device States
+    
+    def __init__(self, host_name,host_comm, host_map):
+        GPUNode.__init__(self, host_name, host_comm, host_map)
+        self.node_states = np.zeros((host_comm.size,), dtype=int)
+        self.world_map = np.empty((host_comm.size,), dtype=int)
+        self._init_host()
+
+    def _init_host(self):
+        na = np.array
+        self.node_states[0] = GPUNode.MASTER
+        #state 0 - IDLE
+        #other state has host comm rank of running process
+        self.device_states = na([0]*cuda.Device.count())
+    
+        self.host_comm.Gather(na([self.world_comm.rank]), self.world_map)
+        self.host_comm.Gather(na([GPUNode.master]), self.node_states)
+
+class DataNode:
+    def __init__(self, host_name, host_map, data_comm):
+        self.world_comm = MPI.COMM_WORLD
+        self.host_name = host_name
+        self.host_map = host_map
+
+
+class MasterNode:
+    def __init__(self, host_name, host_map):
+        self.world_comm = MPI.COMM_WORLD
+        self.host_name = host_name
+        self.host_map = host_map
+
+    def _init_gpu(self):
+        #get
+        pass
+    
+
+class NodeFactory:
+
+    def __init__(self, world_comm):
+        host_comm, type_comm, master_comm = self.genComms(world_comm)
         
+        if master_comm == MPI.COMM_NULL:
+            #worker node
+            if type_comm.name == 'gpu':
+                self.thisNode = GPUNode(world_comm, host_comm, type_comm, master_comm)
+            else:
+                self.thisNode = DataNode(world_comm, host_comm, type_comm, master_comm)
+        else:
+
+            if type_comm.name == 'gpu':
+                self.thisNode = MasterGPUNode(world_comm, host_comm, type_comm, master_comm)
+            else:
+                self.thisNode = MasterDataNode(world_comm, host_comm, type_comm, master_comm)
+
+    def getNode(self):
+        return self.thisNode
+
+    def genComms(self, world_comm):
+        host_comm = self.genHostComm(world_comm)
+        type_comm = self.genTypeComm(world_comm)
+        master_comm = self.genMasterComm(world_comm, type_comm, host_comm)
+
+        return (host_comm, type_comm, master_comm)
+
+
+
+    def genTypeComm(self, world_comm):
+        isgpu = True
+        if socket.gethostname() == 'master':
+            isgpu = False
+        type_comm = world_comm.Split(0 if isgpu else 1)
+        if isgpu:
+            type_comm.name = 'gpu'
+        else:
+            type_comm.name = 'data'
+        return type_comm
+
+
+    def genHostComm(self, world_comm):
+        
+        myh = socket.gethostname()
+        myr = world_comm.rank
+       
+        hlist=world_comm.gather((myh,myr))
+        
+        hlist = world_comm.bcast(hlist) 
+        hlist.sort()
+        hm = {}
+        h_counter = 0
+        
+        for h,r in hlist:
+            if h not in hm:
+                hm[h] = (r,h_counter)
+                #smallest rank in host is boss
+                h_counter += 1
+        host_comm = world_comm.Split( hm[myh][1] )
+        host_comm.name = myh
+        return host_comm
+
+    def genMasterComm(self, world_comm, type_comm, host_comm):
+        master = False
+        if type_comm.name == 'gpu' and host_comm.rank == 0:
+            master = True
+        if type_comm.name == 'data' and type_comm.rank == 0:
+            master = True
+        results = np.empty((world_comm.size,), dtype=int)
+        world_comm.Allgather(np.array([0 if not master else 1]), results)
+        not_masters = [i for i in range(world_comm.size) if results[i] == 0]
+
+        world_group = world_comm.Get_group()
+        master_group = world_group.Excl(not_masters)
+
+        master_comm = world_comm.Create(master_group)
+        if master_comm:
+            master_comm.name = 'master'
+
+        return master_comm
+
+class MPINode:
+    def __init__(self, world_comm, host_comm, type_comm, master_comm ):
+        self.world_comm = world_comm
+        self.host_comm = host_comm
+        self.type_comm = type_comm
+        self.master_comm = master_comm
+        self.log_init()
+
+
+    def log_init(self):
+        logging.info( "world comm rank:\t %i" % self.world_comm.rank )
+        logging.info( "host name:\t %s" % self.host_comm.name )
+        logging.info( "host rank:\t %i" % self.host_comm.rank )
+        logging.info( "type name:\t %s" % self.type_comm.name)
+        logging.info( "type rank:\t %i " % self.type_comm.rank)
+        if self.master_comm == MPI.COMM_NULL:
+            logging.info( "Not master")
+        else:
+            logging.info( "master rank:\t %i" % self.master_comm.rank)
+
+    def nodeType(self):
+        return self.type_comm.name
+
+    def hostMaster(self):
+        return self.host_comm.rank == 0
+
+    def masterNode(self):
+        return  self.master_comm != MPI.COMM_NULL
+
+    def makeDirs(self, dirs, force=False):
+        comm = self._comm
+        if self.hostMaster() or force :
+            for d in dirs:
+                if not op.exists(d):
+                    logging.info("Creating [%s]"%d)
+                    os.makedirs(d)
+ 
+class DataNode(MPINode):
+    def __init__(self, world_comm, host_comm, type_comm, master_comm ):
+        MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+
+    def getData(self, working_dir, working_bucket, ds_bucket):
+        logging.debug("Getting sourcedata and metainfo")
+        self._sd = self.type_comm.bcast(None)
+        self._mi = self.type_comm.bcast(None)
+        logging.debug("Received SourceData and MetaInfo")
+
+    
+
+class MasterDataNode(DataNode):
+    def __init__(self, world_comm, host_comm, type_comm, master_comm ):
+        DataNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+
+    def getData(self, working_dir, working_bucket, ds_bucket):
+        self.working_dir = working_dir
+        self.working_bucket = working_bucket
+        self.ds_bucket = ds_bucket
+
+        self.makeDirs([self.working_dir])
+        self._getDataFiles(data_master)
+        sd = data.SourceData()
+        mi = None
+        logging.info('init SourceData')
+        sd.load_dataframe()
+        sd.load_net_info()
+        logging.info('init MetaInfo')
+        mi = data.MetaInfo(op.join(self.working_dir,'metadata.txt'))
+        logging.info("Broadcasting SourceData and MetaInfo")
+        sd = self.type_comm.bcast(sd)
+        mi = self.type_comm.bcast(mi)
+        logging.info("Received SourceData and MetaInfo")
+
+        self._sd = sd
+        self._mi = mi
+
+
+    def _getDataFiles(self):
+        """
+        Retrieves metadata and parsed dataframe files
+            (generated by utilities/hddata_process.py) from S3
+        """
+        working_dir = self.working_dir
+        data_source_bucket = self.datasource_bucket
+   
+        if not op.exists(op.join( working_dir,'metadata.txt')):
+            conn = boto.connect_s3()
+            b = conn.get_bucket(data_source_bucket)
+            k = Key(b)
+            k.key = 'metadata.txt'
+            k.get_contents_to_filename(op.join( working_dir,'metadata.txt'))
+
+        if not op.exists(op.join( working_dir, 'trimmed_dataframe.pandas')):
+            conn = boto.connect_s3()
+            b = conn.get_bucket(self._working_bucket)
+            k = Key(b)
+            k.key ='trimmed_dataframe.pandas'
+            k.get_contents_to_filename(op.join( working_dir,'trimmed_dataframe.pandas'))
+
+class GPUNode(MPINode):
+    def __init__(self, world_comm, host_comm, type_comm, master_comm ):
+        MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+
+class MasterGPUNode(GPUNode):
+    def __init__(self, world_comm, host_comm, type_comm, master_comm ):
+        GPUNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+
+
+   
+
 if __name__ == "__main__":
+    import time
+
     world_comm = MPI.COMM_WORLD
+    level = logging.INFO
+
+    
+    logfile = "/scratch/sgeadmin/log_mpi_r%i.txt"%world_comm.Get_rank()
+    log_format = '%(asctime)s - %(name)s rank['+str( world_comm.Get_rank() )+']- %(levelname)s - %(message)s'
+    logging.basicConfig(filename=logfile, level=level, format=log_format)
+    logging.info("Starting")
+
+    nf = NodeFactory( world_comm )
+    thisNode = nf.getNode()
+
+    logging.info("Exiting")
+    
+    
+    """
+    me = None
+    if host_name == 'master':
+        if world_comm.rank == 0:
+            me = MasterNode(host_name,
+        me = DataNode()
+        
+    else:
+        if host_comm.rank == 0:
+            me = GPUMaster( host_name,host_comm, host_map )
+        else:
+            me = GPUWorker( host_name, host_comm, host_map )
 
     worker_settings = {
                 'comm':MPI.COMM_WORLD, 
@@ -451,7 +734,6 @@ if __name__ == "__main__":
     comb_results = wkr.joinResults(r)
     if world_comm.rank == 0:
         comb_results.to_pickle('/scratch/sgeadmin/comb_results.%s.pkl' % k_neighbors)
-    """
     for ctr in range(num_runs): 
         for cstrain in wkr.getStrains():
             logging.info("Strain[%s] starting" % cstrain)
