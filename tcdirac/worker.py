@@ -1,3 +1,4 @@
+import scipy.misc
 import static
 import debug
 from mpi4py import MPI
@@ -429,8 +430,9 @@ class Worker:
 
 class NodeFactory:
     def __init__(self, world_comm):
+        logging.info("NodeFactory init")
         host_comm, type_comm, master_comm = self.genComms(world_comm)
-        
+         
         if master_comm == MPI.COMM_NULL:
             #worker node
             if type_comm.name == 'gpu':
@@ -448,9 +450,13 @@ class NodeFactory:
         return self.thisNode
 
     def genComms(self, world_comm):
+        logging.debug("Generating Communicators")
         host_comm = self.genHostComm(world_comm)
+        logging.debug("Host Comm Gen")
         type_comm = self.genTypeComm(world_comm)
+        logging.debug("Type Comm Gen")
         master_comm = self.genMasterComm(world_comm, type_comm, host_comm)
+        logging.debug("Master Comm Gen")
 
         return (host_comm, type_comm, master_comm)
 
@@ -485,6 +491,7 @@ class NodeFactory:
                 hm[h] = (r,h_counter)
                 #smallest rank in host is boss
                 h_counter += 1
+        logging.debug(str(hm[myh]))
         host_comm = world_comm.Split( hm[myh][1] )
         host_comm.name = myh
         return host_comm
@@ -530,6 +537,7 @@ class MPINode:
         self.host_comm = host_comm
         self.type_comm = type_comm
         self.master_comm = master_comm
+        self.nb = np.empty((1,), dtype=int)#nullbuffer
         self.log_init()
 
 
@@ -560,21 +568,32 @@ class MPINode:
                     logging.info("Creating [%s]"%d)
                     os.makedirs(d)
 
-    def getData(self, working_dir, working_bucket, ds_bucket):
+    def getData(self, working_dir, working_bucket, ds_bucket, k):
         pass
 
 class DataNode(MPINode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
 
-    def getData(self, working_dir, working_bucket, ds_bucket):
+    
+        self._nominal_alleles = {}
+        self._sd = None #data.SourceData object
+        self._mi = None #data.MetaInfo
+        self._results = {}
+        self._srt_cache = {}
+        self._sample_x_allele = {}
+        self._pathways = None
+
+    def getData(self, working_dir, working_bucket, ds_bucket,k):
         self.working_dir = working_dir
         self.working_bucket = working_bucket
         self.ds_bucket = ds_bucket
+        self.k = k
         logging.debug("Getting sourcedata and metainfo")
         self._sd = self.type_comm.bcast(None)
         self._mi = self.type_comm.bcast(None)
         logging.debug("Received SourceData and MetaInfo")
+        self._pathways = self._getPathways()
 
     def kNearest(self,compare_list,samp_name, samp_age, k):
         """
@@ -612,9 +631,8 @@ class DataNode(MPINode):
  
     def _getPathways(self):
         pws = None
-        if self.host_comm.rank == pathway_master:
-            pws = self._sd.getPathways()
-        return self.host_comm.bcast(pws)
+        pws = self._sd.getPathways()
+        return pws 
 
     def _getSamplesByStrain(self, strain):
         """
@@ -625,7 +643,7 @@ class DataNode(MPINode):
     def initRMSDFrame(self,cstrain):
         alleles = self.getAlleles(cstrain)
         samples = self._getSamplesByStrain(cstrain)
-        indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(self.pathways, alleles)]
+        indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(self._pathways, alleles)]
         return pandas.DataFrame(np.empty(( len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
 
 
@@ -741,7 +759,7 @@ class DataNode(MPINode):
             sample_allele[allele] = self.getSamplesByAllele(strain,allele)
             for samp_name in sample_names:
                 samp_age = self._mi.getAge(samp_name)
-                neighbors = self.kNearest(sample_allele[allele], samp_name, samp_age, self.k) )
+                neighbors = self.kNearest(sample_allele[allele], samp_name, samp_age, self.k) 
                 samp_i = sm[samp_name]
                 for n_i, n_samp_id in enumerate(neighbors):
                     a_samp_map[samp_i, n_i] = sm[n_samp_id]
@@ -751,9 +769,9 @@ class DataNode(MPINode):
         gene_index = []
         pw_offset = [0]
 
-        for pw in self.pathways:
+        for pw in self._pathways:
             genes = self._sd.getGenes(pw)
-            for g1,g2 in itertools.combination(genes,2):
+            for g1,g2 in itertools.combinations(genes,2):
                 gene_index += [gm[g1],gm[g2]]
             pw_offset.append(pw_offset[-1] + scipy.misc.comb(len(genes),2,exact=1) )
                 
@@ -762,7 +780,8 @@ class DataNode(MPINode):
         expression_matrix = exp.values.astype(np.float32)
        
         dataNode_pkg = (sample_names, alleles, sample_allele)
-        gpuNode_pkg = ( samp_maps, net_map, gene_map, expression_matrix) 
+        gpuNode_pkg = (samp_maps, net_map, gene_map, expression_matrix) 
+        print "made it"
         return (dataNode_pkg, gpuNode_pkg)
 
 
@@ -777,7 +796,7 @@ class MasterDataNode(DataNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         DataNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
 
-    def getData(self, working_dir, working_bucket, ds_bucket):
+    def getData(self, working_dir, working_bucket, ds_bucket,k):
         self.working_dir = working_dir
         self.working_bucket = working_bucket
         self.ds_bucket = ds_bucket
@@ -798,7 +817,8 @@ class MasterDataNode(DataNode):
 
         self._sd = sd
         self._mi = mi
-
+        self._pathways = self._getPathways()
+        self.k = k
 
     def _getDataFiles(self):
         """
@@ -829,7 +849,9 @@ class MasterDataNode(DataNode):
 class GPUNode(MPINode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+        logging.debug("In GPUNode init")
         cuda.init()
+        logging.debug("Cuda Initialized")
         self.ctx = None
 
     def _startCTX(self, dev_id):
@@ -840,13 +862,22 @@ class GPUNode(MPINode):
         self.ctx.pop()
         self.ctx = None
 
+    def getStatus(self):
+        logging.debug("getStatus")
+        self.host_comm.Gather(np.array([self.world_comm.rank],dtype=int), self.nb)
+        logging.debug("exitted getStatus")
+
 
 class MasterGPUNode(GPUNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         GPUNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
-
-
-
+        logging.debug("Master Initialized")
+        
+    def getStatus(self):
+        self._num_slaves = self.host_comm.size - 1
+        self._status = np.zeros((self.host_comm.size,), dtype=int)
+        self.host_comm.Gather(np.array([0],dtype=int), self._status)
+        print self.world_comm.rank, self._status
 
    
 
@@ -856,9 +887,10 @@ if __name__ == "__main__":
                 'working_dir':'/scratch/sgeadmin/hddata/', 
                 'working_bucket':'hd_working_0', 
                 'ds_bucket':'hd_source_data', 
+                'k':5
                 }
     world_comm = MPI.COMM_WORLD
-    level = logging.INFO
+    level = logging.DEBUG
     isgpu = True
     try:
         import pycuda.driver as cuda
@@ -873,8 +905,14 @@ if __name__ == "__main__":
 
     nf = HeteroNodeFactory( world_comm, isgpu )
     thisNode = nf.getNode()
-    thisNode.getData(**worker_settings)
-
+    if thisNode.nodeType() == 'data':
+        thisNode.getData(**worker_settings)
+        for strain in thisNode.getStrains():
+            thisNode.packageData( strain, shuffle=False)
+    else:
+        thisNode.getStatus()
+        logging.debug("status got")
+    world_comm.Barrier()
     logging.info("Exiting")
     
     

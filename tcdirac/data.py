@@ -27,27 +27,12 @@ class SourceData:
     
     def load_net_info(self,  table_name="net_info_table",source_id="c2.cp.biocarta.v4.0.symbols.gmt"):
         self.net_info = NetworkInfo(table_name,source_id)
+        self.initGenes()
 
 
     def getExpression(self, sample_ids):
         df = self.source_dataframe
-        return df[sample_ids,:]
-
-    """dd
-    def getExpression(self, pathway_id, sample_ids=None):
-        Returns a dataframe containing only the genes in pathway
-        df = self.source_dataframe
-        ni = self.net_info
-        genes = ni.getGenes(pathway_id)
-        if not ni.isClean(pathway_id):
-            gset =  set(df.index)
-            genes = [g for g in genes if g in gset]
-            ni.updateGenes( pathway_id, genes )
-        if sample_ids is None:
-            #return all samples
-            return df.loc[genes,:]
-        else:
-            return df.loc[genes,sample_ids]"""
+        return df.loc[:,sample_ids]
 
     def getPathways(self):
         return self.net_info.getPathways()
@@ -60,6 +45,10 @@ class SourceData:
             genes = [g for g in genes if g in gset]
             ni.updateGenes( pathway_id, genes )
         return self.net_info.getGenes(pathway_id)
+
+    def initGenes(self):
+        for pw in self.getPathways():
+            self.getGenes(pw)
             
 class MetaInfo:
     def __init__(self, meta_file):
@@ -118,7 +107,12 @@ class NetworkInfo:
             #simple load balancing
             t = [(len(pw['gene_ids'].split('~:~')), pw['pw_id']) for pw in pw_ids]
             t.sort()
-            self.pathways = [pw for l,pw in t]             
+            self.pathways = [pw for _,pw in t]            
+            for pw in pw_ids:
+                self.gene_map[pw['pw_id']] =pw['gene_ids'][6:].split('~:~')
+                self.gene_clean[pathway_id] = False
+                
+             
         return self.pathways
         
 
