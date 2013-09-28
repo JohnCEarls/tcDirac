@@ -568,12 +568,210 @@ class DataNode(MPINode):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
 
     def getData(self, working_dir, working_bucket, ds_bucket):
+        self.working_dir = working_dir
+        self.working_bucket = working_bucket
+        self.ds_bucket = ds_bucket
         logging.debug("Getting sourcedata and metainfo")
         self._sd = self.type_comm.bcast(None)
         self._mi = self.type_comm.bcast(None)
         logging.debug("Received SourceData and MetaInfo")
 
+    def kNearest(self,compare_list,samp_name, samp_age, k):
+        """
+        Given compare_list, which contains tuples in sorted order
+            of (sample_age, sample_name).
+        returns k sample names that are closest in age to samp_age
+        """
+        compare_list = [(a,n) for a,n in compare_list if (a,n) != (samp_age,samp_name)]
+        while k > len(compare_list):
+            logging.warning("k is too large [%i], adjusting to [%i]"%(k,k-1))
+            k -= 1
+
+        off = k/2
+        i = bisect.bisect_left(compare_list,(samp_age,samp_name) )
+        l = i - off
+        u = i + off
+        if l < 0:
+            u = u - l
+            l = 0
+        if u >= len(compare_list):
+            l = l - (u - (len(compare_list) - 1))
+            u = len(compare_list) - 1
+
+        samp_compare = [s for a,s in compare_list[l:u+1]]
+        return samp_compare
     
+
+    def getAlleles(self, cstrain):
+        if cstrain not in self._nominal_alleles:
+            self._nominal_alleles[cstrain] = self._mi.getNominalAlleles(cstrain)
+        return self._nominal_alleles[cstrain]
+
+    def getStrains(self):
+        return self._mi.getStrains()
+ 
+    def _getPathways(self):
+        pws = None
+        if self.host_comm.rank == pathway_master:
+            pws = self._sd.getPathways()
+        return self.host_comm.bcast(pws)
+
+    def _getSamplesByStrain(self, strain):
+        """
+        Returns a list of all sample ids belonging to strain
+        """
+        return self._mi.getSampleIDs(strain)
+
+    def initRMSDFrame(self,cstrain):
+        alleles = self.getAlleles(cstrain)
+        samples = self._getSamplesByStrain(cstrain)
+        indexes = ["%s_%s" % (pw,allele) for pw,allele in  itertools.product(self.pathways, alleles)]
+        return pandas.DataFrame(np.empty(( len(indexes), len(samples)), dtype=float), index=indexes, columns=samples)
+
+
+    def _partitionSamplesByAllele(self, cstrain, shuffle=False):
+        """
+        Get a dictionary of lists of sample names and ages partitioned by allele in increasing
+            age order.
+        Given alleles(list of strings), mi(metadataInfo object), cstrain (string: current strain)
+        returns dict[allele] -> list:[(age_1,samp_name_1), ... ,(age_n,samp_name_n)] sorted by age
+        """
+        mi = self._mi
+
+        samples = {}
+        if not shuffle:
+            for allele in self.getAlleles(cstrain):
+                samples[allele] = [(mi.getAge(sample),sample)for sample in mi.getSampleIDs(cstrain,allele)]
+                samples[allele].sort()
+        else:
+            #test
+            old = copy.deepcopy(self._sample_x_allele)
+            all_samples = mi.getSampleIDs(cstrain)[:]
+            random.shuffle(all_samples)
+            for allele in self.getAlleles(cstrain):
+                n = len(mi.getSampleIDs(cstrain,allele))
+                samples[allele] = [(mi.getAge(s),s) for s in all_samples[:n]]
+                samples[allele].sort()
+                all_samples = all_samples[n:]
+        self._sample_x_allele[cstrain] = samples 
+
+
+    def initStrain(self, cstrain, mypws, shuffle=False):
+        self._cstrain = cstrain
+        self._partitionSamplesByAllele(cstrain, shuffle)
+        self._results[cstrain] = self.initRMSDFrame( mypws, cstrain )
+
+    def getSamplesByAllele(self, cstrain, allele):
+        return self._sample_x_allele[cstrain][allele]
+
+    def genSRTs(self, cstrain, pw):
+        #self.p.start("genSRTs")
+        if (cstrain, pw) not in self._srt_cache:
+          
+            srts = None 
+            sd = self._sd
+            mi = self._mi
+            samples = []
+            for allele in self.getAlleles(cstrain):
+                samples += [s for a,s in self._sample_x_allele[cstrain][allele]]
+            expFrame = sd.getExpression( pw, samples)
+            srts = dirac.getSRT( expFrame )
+            self._srt_cache[(cstrain,pw)] = srts
+
+        return self._srt_cache[(cstrain, pw)]
+
+    def getRMS(self, rt, srt):
+        return dirac.getRMS( srt, rt )
+
+    def setRMS(self, rms, index, samp):
+        self._results[self._cstrain][samp][index] = rms
+
+    def saveRMS(self,prefix='rms'):
+        for strain, table in self._results.iteritems():
+            ofile_name = '%s.%s.%i.pandas.pkl' % (prefix,strain,self._comm.rank)
+            table.to_pickle(op.join(self._working_dir,ofile_name))
+
+    def classify( self, comm=None ):
+        
+        if comm is None:
+            comm = self._comm
+        class_dict = {}
+        for strain in self.getStrains():
+            mypws = self.getMyPathways(comm)
+            res = self._results[strain]
+            class_dict[strain] = pandas.DataFrame(np.empty(( len(mypws), len(res.columns)), dtype=int) , index=mypws, columns = res.columns )
+            for pw in mypws:
+                alleles = self.getAlleles(strain)
+                for b_allele in alleles:
+                    samps = [s for a,s in self.getSamplesByAllele(strain, b_allele)]
+
+                    b_rows = ["%s_%s" %(pw,allele) for allele in alleles if allele != b_allele]
+                    
+                    for samp in samps:
+                        class_dict[strain][samp][pw] = 1
+                        for row in b_rows:
+                            if res.loc[row,samp] >= res.loc["%s_%s" % (pw, b_allele), samp]:
+                                class_dict[strain][samp][pw] = 0
+            class_dict[strain] = class_dict[strain].sum(1)
+        self._classification_res = class_dict
+        return class_dict
+
+    
+
+    def packageData(self, strain, shuffle=False):
+        """
+        return exp for a strain
+        return 
+        """
+    
+        self._partitionSamplesByAllele( strain, shuffle)
+
+        sample_names = self._getSamplesByStrain(strain)
+        alleles = self.getAlleles(strain)
+        sample_allele = {}
+        self.k
+
+        exp = self._sd.getExpression(sample_names).copy()
+        sample_names = exp.columns
+        sm = dict( ((sm,i) for i, sm in enumerate(exp.columns)) )
+        gm = dict( ((gn,i) for i, gn in enumerate(exp.index)) )
+        samp_maps = []
+        for allele in alleles:
+            a_samp_map = np.empty((len(sample_names),self.k),dtype=np.int32)
+            sample_allele[allele] = self.getSamplesByAllele(strain,allele)
+            for samp_name in sample_names:
+                samp_age = self._mi.getAge(samp_name)
+                neighbors = self.kNearest(sample_allele[allele], samp_name, samp_age, self.k) )
+                samp_i = sm[samp_name]
+                for n_i, n_samp_id in enumerate(neighbors):
+                    a_samp_map[samp_i, n_i] = sm[n_samp_id]
+            samp_maps.append( a_samp_map )
+
+
+        gene_index = []
+        pw_offset = [0]
+
+        for pw in self.pathways:
+            genes = self._sd.getGenes(pw)
+            for g1,g2 in itertools.combination(genes,2):
+                gene_index += [gm[g1],gm[g2]]
+            pw_offset.append(pw_offset[-1] + scipy.misc.comb(len(genes),2,exact=1) )
+                
+        net_map = np.array(pw_offset, dtype=np.int32)
+        gene_map = np.array(gene_index, dtype=np.int32)
+        expression_matrix = exp.values.astype(np.float32)
+       
+        dataNode_pkg = (sample_names, alleles, sample_allele)
+        gpuNode_pkg = ( samp_maps, net_map, gene_map, expression_matrix) 
+        return (dataNode_pkg, gpuNode_pkg)
+
+
+        
+            
+        
+
+        
+
 
 class MasterDataNode(DataNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
@@ -631,10 +829,23 @@ class MasterDataNode(DataNode):
 class GPUNode(MPINode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+        cuda.init()
+        self.ctx = None
+
+    def _startCTX(self, dev_id):
+        dev = cuda.Device(dev_id)
+        self.ctx = dev.make_context()
+
+    def _endCTX(self):
+        self.ctx.pop()
+        self.ctx = None
+
 
 class MasterGPUNode(GPUNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         GPUNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+
+
 
 
    

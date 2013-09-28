@@ -12,12 +12,14 @@ class SourceData:
         logging.info("creating SourceData object")
         self.source_dataframe = None
         self.net_info = None
+        self.genes = set()
     
 
     def load_dataframe( self, data_frame_source='/scratch/sgeadmin/hddata/trimmed_dataframe.pandas' ):
         logging.info("Loading existing expression dataframe[%s]" % data_frame_source)
         try:
             self.source_dataframe = pandas.read_pickle(data_frame_source)
+            self.genes = set(self.source_dataframe.index)
         except Exception as e:
             logging.error("Error loading [%s]" % data_frame_source)
             logging.error(str(e))
@@ -26,10 +28,14 @@ class SourceData:
     def load_net_info(self,  table_name="net_info_table",source_id="c2.cp.biocarta.v4.0.symbols.gmt"):
         self.net_info = NetworkInfo(table_name,source_id)
 
+
+    def getExpression(self, sample_ids):
+        df = self.source_dataframe
+        return df[sample_ids,:]
+
+    """dd
     def getExpression(self, pathway_id, sample_ids=None):
-        """
         Returns a dataframe containing only the genes in pathway
-        """
         df = self.source_dataframe
         ni = self.net_info
         genes = ni.getGenes(pathway_id)
@@ -41,10 +47,19 @@ class SourceData:
             #return all samples
             return df.loc[genes,:]
         else:
-            return df.loc[genes,sample_ids]
+            return df.loc[genes,sample_ids]"""
 
     def getPathways(self):
         return self.net_info.getPathways()
+
+    def getGenes(self, pathway_id):
+        ni = self.net_info
+        genes = ni.getGenes(pathway_id)
+        if not ni.isClean(pathway_id):
+            gset =  self.genes
+            genes = [g for g in genes if g in gset]
+            ni.updateGenes( pathway_id, genes )
+        return self.net_info.getGenes(pathway_id)
             
 class MetaInfo:
     def __init__(self, meta_file):
