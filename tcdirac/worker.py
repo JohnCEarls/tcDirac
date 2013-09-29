@@ -522,15 +522,7 @@ class NodeFactory:
             key = int(myh[4:])
 
         logging.debug("host key[%i]"%key)
-
-        mybuff = np.zeros((world_comm.size,), dtype=int)
-        world_comm.Allgather(np.array([key]), mybuff)
-        if world_comm.rank == 0:
-            print mybuff
-        excl = []
-        wg = world_comm.Get_group()
-        host_group = wg.Excl(excl)
-        host_comm = world_comm.Create(host_group)    
+        host_comm = world_comm.Split(key)
         host_comm.name = myh
         return host_comm
 
@@ -572,12 +564,12 @@ class HeteroNodeFactory(NodeFactory):
         mybuff = np.zeros((world_comm.size,), dtype=int)
         world_comm.Allgather(np.array([key]), mybuff)
         if world_comm.rank == 0:
-            print "type"
+            print "type key"
             print mybuff
         mybuff = np.zeros((world_comm.size,), dtype=int)
         world_comm.Allgather(np.array([type_comm.rank]), mybuff)
         if world_comm.rank == 0:
-            print "type"
+            print "type rank"
             print mybuff
         return type_comm
 
