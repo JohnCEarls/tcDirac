@@ -435,20 +435,9 @@ class NodeFactory:
         host_comm, type_comm, master_comm = self.genComms(world_comm)
         myctr = 0
         rerun = self.checkComms(world_comm, host_comm, type_comm, master_comm)
-        while rerun: 
-            if world_comm.rank == 0:
-                print "rerunning"
-            try:
-                host_comm.Free()
-                type_comm.Free()
-                if master_comm:
-                    master_comm.Free()
-            except:
-                print "leaking"
-            host_comm, type_comm, master_comm = self.genComms(world_comm)
-            rerun = self.checkComms(world_comm, host_comm, type_comm, master_comm)
-            myctr += 1
-            time.sleep(myctr)
+        if rerun: 
+            logging.debug("Comm creation error")
+            raise Exception("Comm creation error")
 
         if master_comm == MPI.COMM_NULL:
             #worker node
@@ -473,7 +462,8 @@ class NodeFactory:
             #check hosts
             my_buffer = np.zeros((world_comm.size,),dtype=int)
             world_comm.Gather(np.array([host_comm.rank],dtype=int),my_buffer)
-            print my_buffer
+            logging.debug("host comm ranks [%s]"%str(my_buffer))
+            
             hosts = {}
             with open(self.host_file, 'r') as hf:
                 ctr = 0
@@ -483,8 +473,18 @@ class NodeFactory:
                         if my_buffer[ctr] > int(slot):
                             rerun = True
                         ctr+=1
+
+
         else:
             world_comm.Gather(np.array([host_comm.Get_rank()],dtype=int), np.empty((1,),dtype=int))
+
+        if master_comm != MPI.COMM_NULL:
+            mybuff = np.zeros((master_comm.size,),dtype=int)
+            master_comm.Gather(np.array([world_comm.rank], dtype=int), mybuff)
+            logging.debug("master comm map [%s]" % str(mybuff))
+        else:
+            logging.debug("not in master comm")
+
         return world_comm.bcast(rerun)
     
 
@@ -535,6 +535,7 @@ class NodeFactory:
         results = np.empty((world_comm.size,), dtype=int)
         world_comm.Allgather(np.array([0 if not master else 1]), results)
         not_masters = [i for i in range(world_comm.size) if results[i] == 0]
+        logging.debug("Master Comm [%s]" % str(results))
 
         world_group = world_comm.Get_group()
         master_group = world_group.Excl(not_masters)
@@ -560,17 +561,6 @@ class HeteroNodeFactory(NodeFactory):
             type_comm.name = 'gpu'
         else:
             type_comm.name = 'data'
-
-        mybuff = np.zeros((world_comm.size,), dtype=int)
-        world_comm.Allgather(np.array([key]), mybuff)
-        if world_comm.rank == 0:
-            print "type key"
-            print mybuff
-        mybuff = np.zeros((world_comm.size,), dtype=int)
-        world_comm.Allgather(np.array([type_comm.rank]), mybuff)
-        if world_comm.rank == 0:
-            print "type rank"
-            print mybuff
         return type_comm
 
 class MPINode:
@@ -921,13 +911,10 @@ class MasterGPUNode(GPUNode):
         self._num_slaves = self.host_comm.size - 1
         self._status = np.zeros((self.host_comm.size,), dtype=int)
         self.host_comm.Gather(np.array([0],dtype=int), self._status)
-        print self.world_comm.rank, self._status
        
         self.host_comm.Gather(np.array([0],dtype=int), self._status)
-        print self.host_comm.rank, self._status
 
         self.host_comm.Gather(np.array([0],dtype=int), self._status)
-        print self.type_comm.rank, self._status
         
 
    
