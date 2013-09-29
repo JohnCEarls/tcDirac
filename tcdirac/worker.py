@@ -429,10 +429,27 @@ class Worker:
         
 
 class NodeFactory:
-    def __init__(self, world_comm):
+    def __init__(self, world_comm, host_file="mpi.hosts"):
+        self.host_file = host_file
         logging.info("NodeFactory init")
         host_comm, type_comm, master_comm = self.genComms(world_comm)
-         
+        myctr = 0
+        rerun = self.checkComms(world_comm, host_comm, type_comm, master_comm)
+        while rerun: 
+            if world_comm.rank == 0:
+                print "rerunning"
+            try:
+                host_comm.Free()
+                type_comm.Free()
+                if master_comm:
+                    master_comm.Free()
+            except:
+                print "leaking"
+            host_comm, type_comm, master_comm = self.genComms(world_comm)
+            rerun = self.checkComms(world_comm, host_comm, type_comm, master_comm)
+            myctr += 1
+            time.sleep(myctr)
+
         if master_comm == MPI.COMM_NULL:
             #worker node
             if type_comm.name == 'gpu':
@@ -449,6 +466,28 @@ class NodeFactory:
     def getNode(self):
         return self.thisNode
 
+
+    def checkComms(self, world_comm, host_comm, type_comm, master_comm):
+        rerun = False
+        if world_comm.rank == 0:
+            #check hosts
+            my_buffer = np.zeros((world_comm.size,),dtype=int)
+            world_comm.Gather(np.array([host_comm.rank],dtype=int),my_buffer)
+            print my_buffer
+            hosts = {}
+            with open(self.host_file, 'r') as hf:
+                ctr = 0
+                for line in hf:
+                    host, slot = line.strip().split('=')
+                    for i in range(0,int(slot)):
+                        if my_buffer[ctr] > int(slot):
+                            rerun = True
+                        ctr+=1
+        else:
+            world_comm.Gather(np.array([host_comm.Get_rank()],dtype=int), np.empty((1,),dtype=int))
+        return world_comm.bcast(rerun)
+    
+
     def genComms(self, world_comm):
         logging.debug("Generating Communicators")
         host_comm = self.genHostComm(world_comm)
@@ -457,7 +496,6 @@ class NodeFactory:
         logging.debug("Type Comm Gen")
         master_comm = self.genMasterComm(world_comm, type_comm, host_comm)
         logging.debug("Master Comm Gen")
-
         return (host_comm, type_comm, master_comm)
 
 
@@ -478,21 +516,22 @@ class NodeFactory:
         
         myh = socket.gethostname()
         myr = world_comm.rank
-       
-        hlist=world_comm.gather((myh,myr))
-        
-        hlist = world_comm.bcast(hlist) 
-        hlist.sort()
-        hm = {}
-        h_counter = 0
-        
-        for h,r in hlist:
-            if h not in hm:
-                hm[h] = (r,h_counter)
-                #smallest rank in host is boss
-                h_counter += 1
-        logging.debug(str(hm[myh]))
-        host_comm = world_comm.Split( hm[myh][1] )
+        if myh == 'master':
+            key = 0
+        else:
+            key = int(myh[4:])
+
+        logging.debug("host key[%i]"%key)
+
+        mybuff = np.zeros((world_comm.size,), dtype=int)
+        world_comm.Allgather(np.array([key]), mybuff)
+        if world_comm.rank == 0:
+            print mybuff
+        excl = []
+        wg = world_comm.Get_group()
+        host_group = wg.Excl(excl)
+        host_comm = world_comm.Create(host_group)    
+        host_comm.rank = myrank    
         host_comm.name = myh
         return host_comm
 
@@ -510,6 +549,7 @@ class NodeFactory:
         master_group = world_group.Excl(not_masters)
 
         master_comm = world_comm.Create(master_group)
+
         if master_comm:
             master_comm.name = 'master'
 
@@ -517,18 +557,29 @@ class NodeFactory:
 
 class HeteroNodeFactory(NodeFactory):
 
-    def __init__(self, world_comm, isgpu):
+    def __init__(self, world_comm, host_file, isgpu):
         self.isgpu = isgpu
-        NodeFactory.__init__(self, world_comm)
+        NodeFactory.__init__(self, world_comm,host_file)
 
     def genTypeComm(self, world_comm):
-        sgpu = self.isgpu
-
-        type_comm = world_comm.Split(0 if isgpu else 1)
+        isgpu = self.isgpu
+        key = 0 if isgpu else 1
+        type_comm = world_comm.Split(key)
         if isgpu:
             type_comm.name = 'gpu'
         else:
             type_comm.name = 'data'
+
+        mybuff = np.zeros((world_comm.size,), dtype=int)
+        world_comm.Allgather(np.array([key]), mybuff)
+        if world_comm.rank == 0:
+            print "type"
+            print mybuff
+        mybuff = np.zeros((world_comm.size,), dtype=int)
+        world_comm.Allgather(np.array([type_comm.rank]), mybuff)
+        if world_comm.rank == 0:
+            print "type"
+            print mybuff
         return type_comm
 
 class MPINode:
@@ -781,7 +832,6 @@ class DataNode(MPINode):
        
         dataNode_pkg = (sample_names, alleles, sample_allele)
         gpuNode_pkg = (samp_maps, net_map, gene_map, expression_matrix) 
-        print "made it"
         return (dataNode_pkg, gpuNode_pkg)
 
 
@@ -850,9 +900,10 @@ class GPUNode(MPINode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
         logging.debug("In GPUNode init")
-        cuda.init()
         logging.debug("Cuda Initialized")
         self.ctx = None
+        assert host_comm.rank < 8, "wcrank[%i] hcomm[%i]"%(world_comm.rank, host_comm.rank) 
+        assert type_comm.rank < 16, "wcrank[%i] tcomm[%i]"%(world_comm.rank, type_comm.rank) 
 
     def _startCTX(self, dev_id):
         dev = cuda.Device(dev_id)
@@ -865,6 +916,8 @@ class GPUNode(MPINode):
     def getStatus(self):
         logging.debug("getStatus")
         self.host_comm.Gather(np.array([self.world_comm.rank],dtype=int), self.nb)
+        self.host_comm.Gather(np.array([self.host_comm.rank],dtype=int), self.nb)
+        self.host_comm.Gather(np.array([self.type_comm.rank],dtype=int), self.nb)
         logging.debug("exitted getStatus")
 
 
@@ -878,6 +931,13 @@ class MasterGPUNode(GPUNode):
         self._status = np.zeros((self.host_comm.size,), dtype=int)
         self.host_comm.Gather(np.array([0],dtype=int), self._status)
         print self.world_comm.rank, self._status
+       
+        self.host_comm.Gather(np.array([0],dtype=int), self._status)
+        print self.host_comm.rank, self._status
+
+        self.host_comm.Gather(np.array([0],dtype=int), self._status)
+        print self.type_comm.rank, self._status
+        
 
    
 
@@ -892,9 +952,11 @@ if __name__ == "__main__":
     world_comm = MPI.COMM_WORLD
     level = logging.DEBUG
     isgpu = True
+    host_file = 'mpi.hosts'
     try:
         import pycuda.driver as cuda
         from gpu import processes
+        cuda.init()
     except ImportError:
         isgpu = False
     
@@ -903,7 +965,7 @@ if __name__ == "__main__":
     logging.basicConfig(filename=logfile, level=level, format=log_format)
     logging.info("Starting")
 
-    nf = HeteroNodeFactory( world_comm, isgpu )
+    nf = HeteroNodeFactory( world_comm,host_file, isgpu )
     thisNode = nf.getNode()
     if thisNode.nodeType() == 'data':
         thisNode.getData(**worker_settings)
