@@ -531,7 +531,6 @@ class NodeFactory:
         wg = world_comm.Get_group()
         host_group = wg.Excl(excl)
         host_comm = world_comm.Create(host_group)    
-        host_comm.rank = myrank    
         host_comm.name = myh
         return host_comm
 
