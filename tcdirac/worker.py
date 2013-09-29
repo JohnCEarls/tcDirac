@@ -943,7 +943,7 @@ if __name__ == "__main__":
     world_comm = MPI.COMM_WORLD
     level = logging.DEBUG
     isgpu = True
-    host_file = 'mpi.hosts'
+    host_file = '/home/sgeadmin/hdproject/tcDirac/tcdirac/mpi.hosts'
     try:
         import pycuda.driver as cuda
         from gpu import processes
