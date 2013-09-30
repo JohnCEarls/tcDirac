@@ -627,6 +627,53 @@ class DataNode(MPINode):
         logging.debug("Received SourceData and MetaInfo")
         self._pathways = self._getPathways()
 
+    def run(self):
+        quit = False
+        status_buffer = np.empty((1,),dtype=int)
+        while not quit:
+            #create data
+            strains = self.getStrains()
+            self.type_comm.Recv( status_buffer, source=0)
+            if status_buffer[0] < 0:
+                quit = True
+            else:
+                if status_buffer[0] < len(strains):
+                    shuffle=False
+                else:
+                    shuffle=True
+                    status_buffer[0] = status_buffer[0]/2
+                mystrain = strains[status_buffer[0]]
+                dataNode_pkg, gpuNode_pkg = self.packageData( mystrain, shuffle )
+
+                (sample_names, alleles, sample_allele) = dataNode_pkg 
+                (samp_maps, net_map, gene_map, expression_matrix) = gpuNode_pkg 
+                self.type_comm.Send( np.array([2], dtype=int), dest=0 )
+
+                self.type_comm.Recv( status_buffer, source=0)
+                
+                mygpu = status_buffer[0]
+                if mygpu > 0:
+                    #send to gpu
+                    self.sendData(  gpuNode_pkg, mygpu )
+                    #receive from gpu
+                    results = self.world_comm.recv( source=mygpu )
+                else:
+                    quit = True
+                
+                
+                
+    
+
+
+                #partition
+
+    def sendData( self, gpuNode_pkg, gpurank):
+        (samp_maps, net_map, gene_map, expression_matrix) = gpuNode_pkg 
+        self.world_comm.send( samp_maps, dest=gpurank )
+        self.world_comm.send(  net_map, dest=gpurank )
+        self.world_comm.send( gene_map, dest=gpurank )
+        self.world_comm.send( expression_matrix, dest=gpurank)
+
     def kNearest(self,compare_list,samp_name, samp_age, k):
         """
         Given compare_list, which contains tuples in sorted order
@@ -826,6 +873,7 @@ class DataNode(MPINode):
 class MasterDataNode(DataNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         DataNode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
+        self._status = np.zeros((type_comm.size,), dtype)
 
     def getData(self, working_dir, working_bucket, ds_bucket,k):
         self.working_dir = working_dir
@@ -877,14 +925,41 @@ class MasterDataNode(DataNode):
                 print "Have you run ~/hdproject/utilities/hddata_process.py lately"
                 raise
 
+
+    def run(self):
+        quit = False
+        strain_counter = self._firstBurst(self)
+        status_buffer = np.zeros((1,), dtype=int)
+        status = MPI.Status()
+        while not quit:
+            self.type_comm.Recv( status_buffer, source=MPI.ANY_SOURCE, status=status )
+            if status_buffer[0] == 0:
+                self.type_comm.Isend(np.array([strain_counter%len(self.strains)],dtype=int), dest=status.source)
+                strain_counter += 1
+            elif status_buffer[0] == 1:
+                self.type_comm.Send( np.array([2], dtype=int), dest=0 )
+
+                self.type_comm.Recv( status_buffer, source=0)
+                
+
+    def _firstBurst(self):
+        strains = self.getStrains()
+        self._strains = strains
+        strain_counter = 0
+        for i in range(1, self.type_comm.size):
+            self.type_comm.Isend(np.array([strain_counter%len(strains)],dtype=int), dest=i)
+            self._status[i] = 1 #preparing data
+            strain_counter += 1
+        return strain_counter 
+        
+   
+
 class GPUNode(MPINode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
         MPINode.__init__(self, world_comm, host_comm, type_comm, master_comm )   
         logging.debug("In GPUNode init")
         logging.debug("Cuda Initialized")
         self.ctx = None
-        assert host_comm.rank < 8, "wcrank[%i] hcomm[%i]"%(world_comm.rank, host_comm.rank) 
-        assert type_comm.rank < 16, "wcrank[%i] tcomm[%i]"%(world_comm.rank, type_comm.rank) 
 
     def _startCTX(self, dev_id):
         dev = cuda.Device(dev_id)
@@ -896,11 +971,47 @@ class GPUNode(MPINode):
 
     def getStatus(self):
         logging.debug("getStatus")
-        self.host_comm.Gather(np.array([self.world_comm.rank],dtype=int), self.nb)
-        self.host_comm.Gather(np.array([self.host_comm.rank],dtype=int), self.nb)
-        self.host_comm.Gather(np.array([self.type_comm.rank],dtype=int), self.nb)
         logging.debug("exitted getStatus")
 
+    def run(self):
+        status_buffer = np.zeros((1,), dtype=int)
+        while not quit:
+            
+            self.host_comm.Recv(status_buffer)
+            if status_buffer < 0:
+                quit = True
+            else:
+                source, samp_maps, net_map, gene_map, expression_matrix = self.recvData()
+                self.host_comm.Send(np.array([1],dtype=int))
+                self.host_comm.Recv(status_buffer)
+                if status_buffer[0] < 0:
+                    quit = True
+                else:
+                    mygpu = status_buffer[0]
+                    result = self.runProcess( samp_maps, net_map, gene_map, expression_matrix, gpu=mygpu )
+                    self.world_comm.send(result, dest=source)
+                    self.host_comm.Isend(np.array([0],dtype=int))
+
+
+
+    def runProcess( self,samp_maps, net_map, gene_map, expression_matrix, gpu ):
+        self._startCTX(self, gpu)
+        #here goes gpu
+        result = None
+        print "GPU vroom, vroom"
+        self._endCTX()
+        self.host_comm.Isend(np.array([2],dtype=int))
+        return result
+        
+
+    def recvData(self):
+        status = MPI.Status()
+        samp_maps = self.world_comm.recv( source=MPI.ANY_SOURCE, status=status )
+        net_map = self.world_comm.recv( source=status.source )
+        gene_map = self.world_comm.recv(  source=status.source )
+        expression_matrix = self.world_comm.recv(  source=status.source )
+        return status.source, samp_maps, net_map, gene_map, expression_matrix
+        
 
 class MasterGPUNode(GPUNode):
     def __init__(self, world_comm, host_comm, type_comm, master_comm ):
@@ -910,12 +1021,10 @@ class MasterGPUNode(GPUNode):
     def getStatus(self):
         self._num_slaves = self.host_comm.size - 1
         self._status = np.zeros((self.host_comm.size,), dtype=int)
-        self.host_comm.Gather(np.array([0],dtype=int), self._status)
-       
-        self.host_comm.Gather(np.array([0],dtype=int), self._status)
+        self.gpu_status = np.zeros((2,),dtype=int)
 
-        self.host_comm.Gather(np.array([0],dtype=int), self._status)
         
+    def run(self)
 
    
 
@@ -946,8 +1055,17 @@ if __name__ == "__main__":
     nf = HeteroNodeFactory( world_comm,host_file, isgpu )
     thisNode = nf.getNode()
     if thisNode.nodeType() == 'data':
+        thisNode.
         thisNode.getData(**worker_settings)
-        for strain in thisNode.getStrains():
+        
+        strains = thisNode.getStrains()
+        is len(strains) <= (thisNode.type_comm.size - 1):
+            def runStrain(strain_id):
+                return strain_id = thisN
+        else:
+            modulo = thisNode.type_comm.size - 1
+        for s_id, strain in enumerate(thisNode.getStrains()):
+           
             thisNode.packageData( strain, shuffle=False)
     else:
         thisNode.getStatus()
