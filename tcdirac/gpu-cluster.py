@@ -7,7 +7,7 @@ import logging
 from boto.sqs.connection import SQSConnection
 import cPickle
 import time
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Lock
 import numpy as np
 from boto.sqs.message import Message
 from mpi4py import MPI
@@ -17,30 +17,72 @@ import pandas
 import itertools
 import scipy.misc
 from tempfile import TemporaryFile
+
+class TimeTracker:
+    def __init__(self):
+        self._wait_tick = time.time()
+        self._work_tick = time.time()
+        self._waiting = 0.0
+        self._working = 0.0
+
+    def start_work(self):
+        self._work_tick= time.time()
+
+    def end_work(self):
+        self._working += time.time() - self._work_tick
+        self._work_tick = time.time()
+
+
+    def start_wait(self):
+        self._wait_tick= time.time()
+
+    def end_wait(self):
+        self._waiting += time.time() - self._wait_tick
+        self._wait_tick = time.time()
+
+    def print_stats(self):
+        print 
+        print "Waiting Time:", self._waiting
+        print "Working Time:", self._working
+        print "working/waiting", self._working/self.waiting
+
+
+
 class DataWorker(Process):
-    def __init__(self, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,q_p2g,q_g2p):
+    def __init__(self, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,q_p2g,q_g2p,stout_lock, max_qsize=10):
         Process.__init__(self)
         self.sqs_conn = boto.connect_sqs()
         self.s3_conn = boto.connect_s3()
+       
         self.sqs_d2g = self.sqs_conn.create_queue(sqs_d2g)
         self.sqs_g2d = self.sqs_conn.create_queue(sqs_g2d)
         self.source_bucket = self.s3_conn.get_bucket(source_bucket)
         self.dest_bucket = self.s3_conn.get_bucket(dest_bucket)
         self.q_p2g = q_p2g
         self.q_g2p = q_g2p
+        self._max_qsize = max_qsize
         self._pause = 0
+        self._tt = TimeTracker()       
+        self.stout_lock = stout_lock
 
     def run(self):
         cont = True
         while cont:
             self._handlePause()
-            self._handleSQS()
+            if self.q_p2g.qsize() < self._max_qsize:
+                self._handleSQS()
+            else:
+                self._pause += 1
             cont = self._handleResults()
-
+        self.stout_lock.acquire()
+        print "DW"
+        self._tt.print_stats()
+        self.stout_lock.release()
 
 
 
     def _handleData(self, file_name):
+        self._tt.start_work()
         logging.debug("DW: handleData(%s)"%file_name)
         k = Key(self.source_bucket)
         k.key = file_name
@@ -48,15 +90,24 @@ class DataWorker(Process):
         k.get_contents_to_file(outfile)
         outfile.seek(0)
         data = np.load(outfile)
-
-        data['action'] = 'process'
-        self.q_p2g.put(data)
+        print data
+        msg = {}
+        msg['action'] = 'process'
+        msg['fname'] = file_name
+        for k,v in data.iteritems():
+            msg[k] = v
+        
+        self.q_p2g.put(msg)
+        print "DW:put message"
+        self._tt.end_work()
 
     def _cleanUp(self):
         self.q_p2g.close()
         self.q_g2p.close()
     
     def _handleSQS(self):
+        
+        self._tt.start_work()
         logging.debug( "DW: getting Messages" )
         messages = self.sqs_d2g.get_messages()
         logging.debug( "DW: mess from SQS")
@@ -72,46 +123,64 @@ class DataWorker(Process):
                 self.sqs_d2g.delete_message(mess_sqs)
                 self._pause = 0
 
+        self._tt.end_work()
 
     def _handleResults(self):
         try:
+            
+            self._tt.start_work()
             results = self.q_g2p.get(False) 
+            print "Action from gpu", results['action']
             logging.debug( "DW: Mess from gpu" )
             if results['action'] == 'exit':
                 self.q_p2g.put({'action':'message', 'msg':'exiting'})
                 self._cleanUp()
+                print "DW:Acknowledging exit"
                 logging.info("DW: exiting after message from master")
                 return False
             elif results['action'] == 'transmit':        
                 self._putData(results)
                 logging.debug( "DW: Sent mess to sqs and s3" )
                 self._pause = 0
+            self._tt.end_work()
         except Empty:
+            print "No results"
             self._pause += 1
             logging.debug( "DW: no mess from gpu" )
-        finally:
-            return True
+        return True
 
     def _handlePause(self):
+        self._tt.start_wait()
         if self._pause > 0:
+            print "DW start sleep"
             logging.debug( "DW: sleeping")
             time.sleep((1.1 ** self._pause) + self._pause + random.random())
+            print "DW end sleep"
+        self._tt.end_wait()
 
     def _putData(self, data):
+        print "putting data"
+        self._tt.start_work()
         logging.debug( "DW: putting Data" )
         fname = data['fname']
         data_s = cPickle.dumps(data)
         k = Key(self.dest_bucket)
         k.key = fname
         k.set_contents_from_string(data_s)
-        self.sqs_g2d.put(fname)
+        m = Message()
+        ms = {}
+        ms['file_name'] = fname
+        ms['action'] = 'results'
+        m.set_body(cPickle.dumps(ms))
+        print "Queue Att", self.sqs_g2d.get_attributes()
+        self.sqs_g2d.write(m)
+        self._tt.end_work()
 
 
 
 
-
-class GPU:
-    def __init__(self, world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket, num_processes=5):
+class GPUBase:
+    def __init__(self, world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket, num_processes=2):
         #SQS queues
         self.sqs_d2g = sqs_d2g
         self.sqs_g2d = sqs_g2d
@@ -131,8 +200,9 @@ class GPU:
         self._joinProcesses()
 
     def _createProcesses(self):
+        self.stout_lock = Lock()
         logging.info("Starting DataWorkers")
-        param = (self.sqs_d2g, self.sqs_g2d, self.source_bucket, self.dest_bucket,self.q_p2g,self. q_g2p)
+        param = (self.sqs_d2g, self.sqs_g2d, self.source_bucket, self.dest_bucket,self.q_p2g,self.q_g2p, self.stout_lock )
         my_processes = [DataWorker(*param) for i in range(self.num_processes)]
         for p in my_processes:
             p.start()
@@ -151,6 +221,7 @@ class GPU:
         if data['msg'] == 'QUIT RECVD':
             for i in range(self.num_processes):
                 self.q_g2p.put({'action':'exit'})
+        
 
     def _handleData(self, data):
         
@@ -166,11 +237,9 @@ class GPU:
 
     def consume(self):
         logging.info( "Starting consumption" )
-        nothing = 0
         while True:
             logging.debug("Master getting data")
             try:
-
                 data = self.q_p2g.get( False )
                 logging.debug( "Master got data" )
 
@@ -181,32 +250,44 @@ class GPU:
 
             except Empty:
                 logging.debug("No data recvd")
-                nothing += 1
+                self._pause += 1
 
-            if nothing:
-                print "nothing"
-                if nothing > 5:
+            if self._pause:
+                if self._pause > 5:
                     logging.info("Exitting due to lack of work")
                     if self.num_processes == 0:
                         logging.debug( "no processes to kill" )
                         return
                     else:
                         logging.debug( "killing processes" )
-                        self.sqs_conn = boto.connect_sqs()
-                        sqs_d2g = self.sqs_conn.create_queue(self.sqs_d2g)
+                        msg = {'action':'exit'}
                         for i in range(self.num_processes):
-                            m = Message()
-                            m.set_body('quit')
-                            status = sqs_d2g.write(m)
+                            self.q_g2p.put({'action':'exit'})           
                         logging.debug("Death warrants sent")
+                        self._pause = 0
                         return
-                time.sleep(2*nothing)
+                time.sleep(self._pause)
 
         
-            
+class GPUDirac(GPUBase):
         
 
-def seed(sqs_d2g = 'tcdirac-togpu-00',
+    def _compute(self, data):
+        
+
+    def _handleData(self, data):
+        
+        #TODO do something with the data
+        time.sleep(2)
+
+
+        data['action'] = 'transmit'
+        logging.debug("Processing complete")
+        self.q_g2p.put(data)
+        logging.debug("results sent to DW")       
+        self._pause = 0
+
+def seed(ignore, sqs_d2g = 'tcdirac-togpu-00',
     sqs_g2d = 'tcdirac-fromgpu-00',
     source_bucket = 'tcdirac-togpu-00',
     dest_bucket = 'tcdirac-fromgpu-00'):
@@ -222,7 +303,7 @@ def seed(sqs_d2g = 'tcdirac-togpu-00',
         st = time.time()
         dp = genFakeData(200, 20000)
         
-        fname = "afile_%i_%i"%(i, random.randint(1,99999))
+        fname = "afile_%i_%i_%i"%(ignore, i, random.randint(1,99999))
         print st - time.time()
         st = time.time()
         print "pickleData"
@@ -249,6 +330,11 @@ def seed(sqs_d2g = 'tcdirac-togpu-00',
         st = time.time()
         print "sent 1"
 
+
+def clearSQS(queue_name):
+    sqs_conn = boto.connect_sqs()
+    sqs = sqs_conn.create_queue(queue_name)
+    sqs.clear()
 
 def genFakeData( n, gn):
     neighbors = random.randint(5, 20) 
@@ -311,14 +397,19 @@ if __name__ == "__main__":
     sqs_g2d = 'tcdirac-fromgpu-00'
     source_bucket = 'tcdirac-togpu-00'
     dest_bucket = 'tcdirac-fromgpu-00'
-    seed()
-    """
+    clearSQS(sqs_d2g)
+    clearSQS(sqs_g2d)
+    from multiprocessing import Pool
+    
+    p = Pool(6)
+    p.map(seed, range(6))
+   
     world_comm = MPI.COMM_WORLD
     initLogging("tcdirac_gpu_mpi_%i.log"%world_comm.rank, logging.DEBUG)
     
 
     g = GPU(world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,2)
-    g.run()"""
+    g.run()
 
                 
                 
