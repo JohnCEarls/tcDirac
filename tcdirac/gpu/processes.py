@@ -1,6 +1,6 @@
 import dirac
 import data
-import pycuda as cuda
+import pycuda.driver as cuda
 import numpy as np
 from pycuda._driver import MemoryError
 import logging 

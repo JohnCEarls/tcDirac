@@ -18,6 +18,10 @@ import itertools
 import scipy.misc
 from tempfile import TemporaryFile
 
+from gpu import processes
+
+import pycuda.driver as cuda
+
 class TimeTracker:
     def __init__(self):
         self._wait_tick = time.time()
@@ -44,7 +48,8 @@ class TimeTracker:
         print 
         print "Waiting Time:", self._waiting
         print "Working Time:", self._working
-        print "working/waiting", self._working/self.waiting
+        print "working/waiting", self._working/self._waiting
+        print 
 
 
 
@@ -180,7 +185,7 @@ class DataWorker(Process):
 
 
 class GPUBase:
-    def __init__(self, world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket, num_processes=2):
+    def __init__(self, world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket, dev_id, num_processes=2):
         #SQS queues
         self.sqs_d2g = sqs_d2g
         self.sqs_g2d = sqs_g2d
@@ -193,11 +198,25 @@ class GPUBase:
 
         self.num_processes = num_processes
         self._pause = 0
+        self._dev_id = dev_id
 
     def run(self):
         self._createProcesses()
-        self.consume()
-        self._joinProcesses()
+        cuda.init()
+        dev = cuda.Device(self._dev_id)
+        
+        ctx = dev.make_context()
+        try:
+            self.consume()
+        except Exception as e:
+            print e
+            self._kill_processes()
+            while self.num_processes:
+                self.q_p2g.get()
+            raise
+        else:
+            self._joinProcesses()
+            ctx.pop()
 
     def _createProcesses(self):
         self.stout_lock = Lock()
@@ -259,33 +278,51 @@ class GPUBase:
                         logging.debug( "no processes to kill" )
                         return
                     else:
-                        logging.debug( "killing processes" )
-                        msg = {'action':'exit'}
-                        for i in range(self.num_processes):
-                            self.q_g2p.put({'action':'exit'})           
-                        logging.debug("Death warrants sent")
-                        self._pause = 0
                         return
                 time.sleep(self._pause)
+
+    def _kill_processes(self):
+        logging.debug( "killing processes" )
+        msg = {'action':'exit'}
+        for i in range(self.num_processes):
+            self.q_g2p.put({'action':'exit'})           
+        logging.debug("Death warrants sent")
+        self._pause = 0
 
         
 class GPUDirac(GPUBase):
         
 
     def _compute(self, data):
-        
+        sample_block_size, npairs_block_size, nets_block_size = self._getBlockSize(data)
+        expression_matrix = data['expression_matrix']
+        gene_map = data['gene_map'] 
+        sample_map = data['sample_map']
+        network_map = data['network_map']
+        print "Computing"
+        rt,rt,rms = processes.runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,rms_only=True )
+        print "done computing"
+        result = {}
+        result['fname'] = data['fname']
+        result['action'] = 'transmit'
+        result['rms'] = rms.res_data
+        return result       
 
     def _handleData(self, data):
-        
+        print "handling data" 
         #TODO do something with the data
-        time.sleep(2)
+        result = self._compute(data)
 
-
-        data['action'] = 'transmit'
         logging.debug("Processing complete")
-        self.q_g2p.put(data)
+        self.q_g2p.put(result)
         logging.debug("results sent to DW")       
         self._pause = 0
+
+    def _getBlockSize(self, data):
+        """
+        Prob wanna get smarter about this
+        """
+        return (32,16,4)
 
 def seed(ignore, sqs_d2g = 'tcdirac-togpu-00',
     sqs_g2d = 'tcdirac-fromgpu-00',
@@ -353,7 +390,7 @@ def genFakeData( n, gn):
     net_map = [0]
    
     for i in range(nnets):
-        n_size = random.randint(5,300)
+        n_size = random.randint(5,100)
 
         net_map.append(net_map[-1] + scipy.misc.comb(n_size,2, exact=1))
         net = random.sample(genes,n_size)
@@ -370,10 +407,10 @@ def genFakeData( n, gn):
     network_map = np.array(net_map)
 
     data = {}
-    data['expression_matrix'] = None#expression_matrix
-    data['gene_map'] = None#gene_map
+    data['expression_matrix'] = expression_matrix
+    data['gene_map'] = gene_map
     data['sample_map'] = sample_map
-    data['network_map'] = None#network_map
+    data['network_map'] = network_map
     return data
 
 def initLogging(lname,level):
@@ -400,15 +437,13 @@ if __name__ == "__main__":
     clearSQS(sqs_d2g)
     clearSQS(sqs_g2d)
     from multiprocessing import Pool
-    
     p = Pool(6)
     p.map(seed, range(6))
-   
     world_comm = MPI.COMM_WORLD
     initLogging("tcdirac_gpu_mpi_%i.log"%world_comm.rank, logging.DEBUG)
     
 
-    g = GPU(world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,2)
+    g = GPUDirac(world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,dev_id=0, num_processes=2)
     g.run()
 
                 

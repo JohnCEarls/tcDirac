@@ -245,7 +245,7 @@ class NetworkMap:
         center = bisect.bisect(self.orig_data, self.orig_data[-1]/2)
         if center == len(self.orig_data) - 1:
             center -= 1
-        assert 0 < center < len(self.orig_data)
+        assert 0 < center < len(self.orig_data), "If this assert is reached, then a single network is too big for memory.If you want to fix this you will have to rework the code"
         if center == len(self.orig_data) - 1:
             center -= 1
         part = self.orig_data[center]
