@@ -208,17 +208,17 @@ class GPUBase:
         try:
             self.consume()
         except Exception as e:
-            print "Shite ", e
-            #clean up processes and resources, then raise error 
+            logging.error(type(e) + ' - ' + str(e))
+            logging.error("Master: Clean up processes and resources, then raise error")
             self._kill_processes()
             self._join_processes(3)
             ctx.pop()
             raise
-        print "Graceful Death"
+        logging.debug("Master: Graceful Death")
         self._kill_processes()
         self._join_processes()
         ctx.pop()
-        print "Outa here"
+        logging.debug("Master: gpuBase.run() exitting")
 
     def _createProcesses(self):
         self.stout_lock = Lock()
@@ -253,6 +253,8 @@ class GPUBase:
         logging.info("Joining DataWorkers")
         for p in self._processes:
             p.join( timeout )
+            if p.is_alive():
+                logging.debug("Master: join timed out")
 
     def _handleMessage(self, msg):
         logging.debug("MSG: %s"% data['msg'])
@@ -312,14 +314,12 @@ class GPUBase:
 
     def _kill_processes(self):
         logging.debug( "killing processes" )
-        print "senging exit actions"
         for i in range(self.num_processes):
             self.q_g2p.put({'action':'exit'})           
         logging.debug("Death warrants sent")
         self._pause = 0
         while self.num_processes > 0:
             try:
-                print "Waiting for grace"
                 while True:
                     try:
                         data = self.q_p2g.get(block=True, timeout=5)
@@ -330,13 +330,13 @@ class GPUBase:
                         if e.errno != errno.EINTR:
                             raise
                 if 'msg' in data and  data['msg'] == 'exiting':
-                    logging.debug("Subprocess exitted")
+                    logging.debug("Master: a Subprocess messaged exit")
                     self.num_processes -= 1
                 else:
                     logging.warning("Master: Killing Subprocess, but recvd non death msg [%s]" % str(data) )
             except Empty:
                 #Tried to play nice, now we just terminate the slackers
-                print "Fuck it"
+                logging.error("Master: subprocesses not exitting gracefully")
                 self._hard_terminate()
                 self.num_processes = 0
         self._join_processes( 3 )
@@ -344,7 +344,7 @@ class GPUBase:
     def _hard_terminate(self):
         for p in self._processes:
             if p.is_alive():
-                print "DIE"
+                logging.debug("Master: Process <%i> is still alive. Sending SIGTERM."%p.pid)
                 p.terminate()
             
 
