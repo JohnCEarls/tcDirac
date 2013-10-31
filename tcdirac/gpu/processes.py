@@ -5,13 +5,19 @@ import numpy as np
 from pycuda._driver import MemoryError
 import logging 
 
-def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,rms_only=False ):
+def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, dataloader, rms_only=False,split=False ):
+    if expression_matrix is None:
+        expression_matrix = dataloader.get_expression_matrix()
+        gene_map = dataloader.get_gene_map()
+        sample_map = dataloader.get_sample_map()
+        network_map = dataloader.get_network_map()
+
     exp = data.Expression( expression_matrix )
 
     gm = data.GeneMap( gene_map )
     
     srt = data.SampleRankTemplate( exp.orig_nsamples, gm.orig_npairs )
-
+    
     sm = data.SampleMap( sample_map )
     
     rt = data.RankTemplate( exp.orig_nsamples, gm.orig_npairs )
@@ -26,7 +32,7 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
 
     if req_mem > cuda.mem_get_info()[0]*.95: #if we can split without error, lets
         logging.info("Splitting data from calculation")
-        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
+        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, dataloader, rms_only, resplit=True if split else False )
 
     try:
         exp.toGPU( sample_block_size )
@@ -43,7 +49,10 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
         for d in [exp,rms, nm, rt, sm, srt, gm]:
             if d.gpu_data is not None:
                 d.gpu_data.free()
-        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
+        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,dataloader, rms_only, resplit=True if split else False )
+    if not split:
+        dataloader.set_add_data()
+        dataloader.clear_data_ready()
 
     dirac.sampleRankTemplate( exp.gpu_data, gm.gpu_data, srt.gpu_data, exp.buffer_nsamples, gm.buffer_npairs, npairs_block_size, sample_block_size)
     
@@ -63,13 +72,13 @@ def reqMemory(exp, rms,np,rt,sm,srt,gm,nm,sample_block_size, nets_block_size, np
     pred += gm.gpu_mem( npairs_block_size )
     return pred
 
-def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only=False ):
+def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, dataloader, rms_only=False, resplit=False ):
     gm =  data.GeneMap( gene_map )
     nm = data.NetworkMap( network_map )
     part_point,nm1,nm2 = nm.split()
     gm1,gm2 = gm.split(part_point)
     logging.info("Running first split")
-    srt1, rt1, rms1 = runDirac( expression_matrix, gm1.orig_data, sample_map, nm1.orig_data, sample_block_size, npairs_block_size, nets_block_size, rms_only )
+    srt1, rt1, rms1 = runDirac( expression_matrix, gm1.orig_data, sample_map, nm1.orig_data, sample_block_size, npairs_block_size, nets_block_size, rms_only, split=True )
     if rms_only:
         srt1 = None
         rt1 = None
@@ -86,7 +95,12 @@ def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_blo
             d.buffer_data = None
             d.gpu_data = None
     logging.info("Running second split")
-    srt2,rt2,rms2 = runDirac( expression_matrix, gm2.orig_data, sample_map, nm2.orig_data, sample_block_size, npairs_block_size, nets_block_size,rms_only )
+    srt2,rt2,rms2 = runDirac( expression_matrix, gm2.orig_data, sample_map, nm2.orig_data, sample_block_size, npairs_block_size, nets_block_size,rms_only, split=True )
+    if not resplit:
+        #only free memory if  this is top split
+        dataloader.set_add_data()  
+        dataloader.clear_data_ready()
+
 
     if rms_only:
         srt2 = None

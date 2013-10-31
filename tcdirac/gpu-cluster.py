@@ -60,8 +60,6 @@ class TimeTracker:
         print "working/waiting", self._working/self._waiting
         print 
 
-
-
 class DataWorker(Process):
     def __init__(self,p_rank,  sqs_d2g, sqs_g2d, source_bucket, dest_bucket,q_p2g,q_g2p,stout_lock, max_qsize):
         Process.__init__(self)
@@ -186,28 +184,110 @@ class DataWorker(Process):
         self.sqs_g2d.write(m)
         self._tt.end_work()
 
+class DataBoss:
+    def __init__(self, base_name, file_q,indir,data_settings):
+        self.file_q = file_q
+        self.indir = indir
+        self.loaders = self._createLoaders('_'.join(['proc',base_name]), data_settings)
+
+
+    def _createLoaders(self, base_name, data_settings):
+        loaders = {}
+        for name, dsize, dtype in data_settings:
+            loaders[name] = self._createLoader( '_'.join([base_name,name]), dsize, dtype )
+        self.loaders = loaders
+
+
+    def start(self):
+        for l in self.loaders.itervalues():
+            l.start()
+
+    def killAll(self):
+        for l in self.loaders.itervalues():
+            l.die()
+            l.process.join()
+        
+
+
+    def _createLoader(self,name, dsize, dtype)
+        smem = self._create_shared(dsize, dtype)
+        evts = self._create_events()
+        l = Loader( self.file_q, evts, smem, self.indir, name)
+        ls = LoaderStruct(name,smem,evts,process=l)
+        
+    def _create_shared(self, dsize, dtype):
+        shared_mem = {}
+        shared_mem['data'] = Array(dtypes.to_ctypes(dtype),dsize )
+        shared_mem['shape'] = Array(dtype.to_ctypes(np.int64), 2)
+        shared_mem['dtype'] = Value('i',dtypes.nd_dict[dtype])
+
+    def _create_events(self):
+        events = {}
+        events['add_data'] = Event()
+        events['data_ready'] = Event()
+        events['die'] = Event()
+        return events
+
+    def set_add_data(self):
+        for v in self.loaders.itervalues():
+            v.events['add_data'].set()
+
+    def clear_data_ready(self):
+        for v in self.loaders.itervalues():
+            v.events['data_ready'].clear()
+
+    def wait_data_ready(self):
+        ready = True
+        for v in self.loaders.itervalues():
+            if not v.events['data_ready'].wait(10):
+                ready = False
+        if not ready:
+            self.killAll()
+            return False
+        else:
+            return True
+
+class LoaderStruct:
+    def __init__(self,name,shared_mem,events,process=None):
+        self.name = name
+        self.shared_mem = shared_mem
+        self.events = events
+        self.process = process
+
+    def start(self):
+        for e in events.itervalues():
+            e.clear()
+        self.process.start()
+
+    def die(self):
+        self.events['die'].set()
+
 class Loader(Process):
-    def __init__(self, inst_q,evt_add_data, evt_data_ready,evt_die, smem_data, smem_shape, smem_dtype, indir, name, add_data_timeout=10, inst_q_timeout=3):
+    def __init__(self, inst_q, events, shared_mem, indir, name, add_data_timeout=10, inst_q_timeout=3):
         """
             inst_q mp queue that tells process next file name
-            evt_add_data mp event, true means add data 
-            evt_data_ready mp event, true means data is ready to be consumed
-            smem_data = shared memory for numpy array buffer
-            smem_shape = shared memory for np array shape
-            smem_dtype = shared memory for np array dtype
-            indir = string encoding location where incoming np data is being written
-            name = process name
+            events = dict of mp events
+                events['add_data'] mp event, true means add data 
+                events['data_ready'] mp event, true means data is ready to be consumed
+                events['die'] event with instructions to die
+            shared_mem = dict containing shared memory
+                shared_mem['data'] = shared memory for numpy array buffer
+                shared_mem['shape'] = shared memory for np array shape
+                shared_mem['dtype'] = shared memory for np array dtype
+            indir = string encoding location where incoming np data is being written and should be read from
+            name = process name(up to you to make it unique)
             add_data_timeout = time in seconds before you check for death when waiting for gpu to release memory
             inst_q_timeout = time in seconds before you check for death when waiting for new filename
         """
         Process.__init__(self, name=name)
+        
         self.instruction_queue = inst_q
-        self.smem_data = smem_data
-        self.smem_shape = smem_shape
-        self.smem_dtype = smem_dtype
-        self.evt_add_data = evt_add_data
-        self.evt_data_ready = evt_data_ready
-        self.evt_die = evt_die
+        self.smem_data = shared_mem['data']
+        self.smem_shape = shared_mem['shape']
+        self.smem_dtype = shared_mem['dtype']
+        self.evt_add_data = events['add_data']
+        self.evt_data_ready = events['data_ready']
+        self.evt_die = events['die']
         self.indir = indir
         self._ad_timeout = add_data_timeout
         self._iq_timeout = inst_q_timeout
@@ -279,56 +359,54 @@ class Loader(Process):
         return fname.split('_')[-1]
             
 def testLoader():
-    dtype_wrapper = [(np.float32, ctypes.c_float), (np.float, ctypes.c_double), (np.uint32, ctypes.c_uint), (np.uint, ctypes.c_ulonglong)]
     bdir = '/scratch/sgeadmin/'
     np_list = []
     inst_q = Queue()
+    data_settings = [('exp', 200*20000, np.float32), ('sm',5*200, np.uint32)]
+    db = DataBoss('1',inst_q,bdir,data_settings)
+    db.start()
     
+    """
+            events = dict of mp events
+                events['add_data'] mp event, true means add data 
+                events['data_ready'] mp event, true means data is ready to be consumed
+                events['die'] event with instructions to die
+            shared_mem = dict containing shared memory
+                shared_mem['data'] = shared memory for numpy array buffer
+                shared_mem['shape'] = shared memory for np array shape
+                shared_mem['dtype'] = shared memory for np array dtype
+    """
+
     for i in range(10):
         a = np.random.rand(20,50).astype(np.float32)
         f_hash = hashlib.sha1(a).hexdigest()
         fname = '_'.join(['mf', str(random.randint(1000,10000)), f_hash])
         with open(os.path.join(bdir,fname),'wb') as f:
             np.save(f,a)
-
         inst_q.put(fname)
         inst_q.put(fname)
         np_list.append(a)
-        
-    evt_add_data = Event()
-    evt_add_data.clear()
-    evt_data_ready = Event()
-    evt_data_ready.clear()
-    evt_die = Event()
-    evt_die.clear()
-    
-    smem_data = Array(ctypes.c_float, a.size *4)
-    smem_shape = Array(ctypes.c_longlong, 2)
-    smem_dtype = Value('i',0)
-    indir = bdir
-    print "starting"
-    l = Loader( inst_q,evt_add_data, evt_data_ready,evt_die, smem_data, smem_shape, smem_dtype, indir, name="testname")
-    l.start()
-    evt_add_data.set()
+    events['add_data'].set()
+    db.set_add_data()
     for a in np_list:
         for i in range(2):        
             print "setting data"
-            print "evt_add_data", evt_add_data.is_set()
+            print "events['add_data']", events['add_data'].is_set()
             print "set"
             
-            print "evt_data_ready", evt_data_ready.is_set()
-            evt_data_ready.wait()
-            evt_data_ready.clear()
-            myshape = np.frombuffer(smem_shape.get_obj(),dtype=int)
+            print "events['data_ready", events['data_ready'].is_set()
+            events['data_ready'].wait()
+            events['data_ready'].clear()
+            myshape = np.frombuffer(shared_mem['shape'].get_obj(),dtype=int)
             size = myshape[0]*myshape[1]
-            a_copy =  np.frombuffer(smem_data.get_obj(), dtype=dtypes.nd_list[smem_dtype.value])
-            evt_add_data.set() 
+            a_copy =  np.frombuffer(shared_mem['data'].get_obj(), dtype=dtypes.nd_list[shared_mem['dtype'].value])
+            events['add_data'].set() 
             a_copy = a_copy[:size]
             a_copy = a_copy.reshape((myshape[0],myshape[1]))
 
             print "Matches", np.allclose(a, a_copy)
 
-    evt_die.set()
+    events['die'].set()
     time.sleep(15)
     l.join()
     print "exitted gracefully"
@@ -500,12 +578,6 @@ class GPUBase:
             if p.is_alive():
                 logging.debug("Master: Process <%i> is still alive. Sending SIGTERM."%p.pid)
                 p.terminate()
-            
-
-
-
-
-        
 
         
 class GPUDirac(GPUBase):
