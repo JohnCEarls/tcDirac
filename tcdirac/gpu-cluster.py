@@ -8,7 +8,8 @@ import logging
 from boto.sqs.connection import SQSConnection
 import cPickle
 import time
-from multiprocessing import Process, Queue, Lock, Value
+from multiprocessing import Process, Queue, Lock, Value, Event, Array
+import ctypes
 import numpy as np
 from boto.sqs.message import Message
 from mpi4py import MPI
@@ -18,7 +19,7 @@ import pandas
 import itertools
 import scipy.misc
 from tempfile import TemporaryFile
-
+import hashlib
 from gpu import processes
 
 import pycuda.driver as cuda
@@ -177,6 +178,119 @@ class DataWorker(Process):
         m.set_body(cPickle.dumps(ms))
         self.sqs_g2d.write(m)
         self._tt.end_work()
+
+class Loader(Process):
+    def __init__(self, inst_q,evt_add_data, evt_data_ready, smem_data, smem_shape, smem_dtype, indir):
+        """
+            inst_q mp queue that tells process next file name
+            evt_add_data mp event, true means add data 
+            evt_data_ready mp event, true means data is ready to be consumed
+            smem_data = shared memory for numpy array buffer
+            smem_shape = shared memory for np array shape
+            smem_dtype = shared memory for np array dtype
+            indir = string encoding location where incoming np data is being written
+        """
+        Process.__init__(self)
+        self.instruction_queue = inst_q
+        self.smem_data = smem_data
+        self.smem_shape = smem_shape
+        self.smem_dtype = smem_dtype
+        self.evt_add_data = evt_add_data
+        self.evt_data_ready = evt_data_ready
+        self.dtype_wrapper = [(np.float32, ctypes.c_float), (np.float, ctypes.c_double), (np.uint32, ctypes.c_uint), (np.uint, ctypes.c_ulonglong)]
+        self.indir = indir
+
+
+    def loadMem(self, np_array):
+        shape = np_array.shape
+        dtype = np_array.dtype
+        size = np_array.size
+        i =0
+        for np_type, c_type in self.dtype_wrapper:
+            if dtype == np_type:
+                dt_id = i
+                break
+            i += 1
+        np_array = np_array.reshape(size)
+
+
+        with self.smem_data.get_lock():
+            print np_array.size
+            print np_array.shape
+            print len(self.smem_data[:size])
+            for i in xrange(size):
+                self.smem_data[i] = np_array[i]
+        with self.smem_shape.get_lock():
+            self.smem_shape[:len(shape)] = shape[:]
+        with self.smem_dtype.get_lock():
+            self.smem_dtype = dt_id
+
+    def getData(self, fname):
+        return np.load(os.path.join(self.indir, fname))
+
+    def run(self):  
+        old_md5 = '0'
+        fname = self.instruction_queue.get()
+        new_md5 = fname.split('_')[-1]
+        print "nm", new_md5
+        old_dcount = -1
+        data = self.getData(fname)
+        print "a: evt_add_data", self.evt_add_data.is_set()
+        print fname
+        while self.evt_add_data.wait():
+            print "loading data into mem"
+            self.loadMem( data ) 
+            print "clearing add data"
+            self.evt_add_data.clear()
+            self.evt_data_ready.set()
+
+            fname = self.instruction_queue.get()
+            old_md5 = new_md5
+            new_md5 = dname.split('_')[-1]
+            
+            if new_md5 != old_md5:
+                data = self.getData(fname)
+    
+            
+def testLoader():
+    dtype_wrapper = [(np.float32, ctypes.c_float), (np.float, ctypes.c_double), (np.uint32, ctypes.c_uint), (np.uint, ctypes.c_ulonglong)]
+    bdir = '/scratch/sgeadmin/'
+    a = np.random.rand(20,50).astype(np.float32)
+    f_hash = hashlib.sha1(a).hexdigest()
+    fname = '_'.join(['mf', str(random.randint(1000,10000)), f_hash])
+    with open(os.path.join(bdir,fname),'wb') as f:
+        np.save(f,a)
+
+    inst_q = Queue()
+    inst_q.put(fname)
+    evt_add_data = Event()
+    evt_add_data.clear()
+    evt_data_ready = Event()
+    evt_data_ready.clear()
+    smem_data = Array(ctypes.c_float, a.size *4)
+    smem_shape = Array(ctypes.c_longlong, 2)
+    smem_dtype = Value('i',0)
+    indir = bdir
+    print "starting"
+    l = Loader(inst_q,evt_add_data, evt_data_ready, smem_data, smem_shape, smem_dtype, indir)
+    l.start()
+    
+    print "setting data"
+    evt_add_data.set()
+    print "evt_add_data", evt_add_data.is_set()
+    print "set"
+    
+    print "evt_data_ready", evt_data_ready.is_set()
+    evt_data_ready.wait()
+    myshape = np.frombuffer(smem_shape.get_obj(),dtype=int)
+    size = myshape[0]*myshape[1]
+    a_copy =  np.frombuffer(smem_data.get_obj(), dtype=dtype_wrapper[smem_dtype.value][0])
+    
+    a_copy = a_copy[:size]
+    a_copy = a_copy.reshape((myshape[0],myshape[1]))
+
+    print np.allclose(a, a_copy)
+    l.terminate()
 
 
 
@@ -491,6 +605,8 @@ def initLogging(lname,level):
 
 
 if __name__ == "__main__":
+    testLoader()
+    """
     sqs_d2g = 'tcdirac-togpu-00'
     sqs_g2d = 'tcdirac-fromgpu-00'
     source_bucket = 'tcdirac-togpu-00'
@@ -505,7 +621,7 @@ if __name__ == "__main__":
     
 
     g = GPUDirac(world_comm, sqs_d2g, sqs_g2d, source_bucket, dest_bucket,dev_id=0, num_processes=5)
-    g.run()
+    g.run()"""
 
                 
                 
