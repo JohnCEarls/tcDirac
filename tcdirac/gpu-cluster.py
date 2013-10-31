@@ -1,28 +1,35 @@
+import sys
 import errno
-import logging
+import time
 import os
 import os.path
-import boto
-from boto.s3.key import Key
 import logging
-from boto.sqs.connection import SQSConnection
-import cPickle
-import time
-from multiprocessing import Process, Queue, Lock, Value, Event, Array
-import ctypes
-import numpy as np
-from boto.sqs.message import Message
-from mpi4py import MPI
-from Queue import Empty
-import random
-import pandas
 import itertools
-import scipy.misc
 from tempfile import TemporaryFile
 import hashlib
-from gpu import processes
+import random
+import cPickle
+
+from multiprocessing import Process, Queue, Lock, Value, Event, Array
+from Queue import Empty
+
+import boto
+from boto.s3.key import Key
+from boto.sqs.connection import SQSConnection
+from boto.sqs.message import Message
+
+import ctypes
+import numpy as np
+import scipy.misc
+import pandas
+
+from mpi4py import MPI
 
 import pycuda.driver as cuda
+
+import dtypes
+from gpu import processes
+
 
 class TimeTracker:
     def __init__(self):
@@ -180,7 +187,7 @@ class DataWorker(Process):
         self._tt.end_work()
 
 class Loader(Process):
-    def __init__(self, inst_q,evt_add_data, evt_data_ready, smem_data, smem_shape, smem_dtype, indir):
+    def __init__(self, inst_q,evt_add_data, evt_data_ready,evt_die, smem_data, smem_shape, smem_dtype, indir, name, add_data_timeout=10, inst_q_timeout=3):
         """
             inst_q mp queue that tells process next file name
             evt_add_data mp event, true means add data 
@@ -189,109 +196,142 @@ class Loader(Process):
             smem_shape = shared memory for np array shape
             smem_dtype = shared memory for np array dtype
             indir = string encoding location where incoming np data is being written
+            name = process name
+            add_data_timeout = time in seconds before you check for death when waiting for gpu to release memory
+            inst_q_timeout = time in seconds before you check for death when waiting for new filename
         """
-        Process.__init__(self)
+        Process.__init__(self, name=name)
         self.instruction_queue = inst_q
         self.smem_data = smem_data
         self.smem_shape = smem_shape
         self.smem_dtype = smem_dtype
         self.evt_add_data = evt_add_data
         self.evt_data_ready = evt_data_ready
-        self.dtype_wrapper = [(np.float32, ctypes.c_float), (np.float, ctypes.c_double), (np.uint32, ctypes.c_uint), (np.uint, ctypes.c_ulonglong)]
+        self.evt_die = evt_die
         self.indir = indir
+        self._ad_timeout = add_data_timeout
+        self._iq_timeout = inst_q_timeout
 
 
     def loadMem(self, np_array):
+        """
+        loads data from a numpy array into the provided shared memory
+        """
         shape = np_array.shape
-        dtype = np_array.dtype
+        dt_id = dtypes.nd_dict[np_array.dtype]
         size = np_array.size
-        i =0
-        for np_type, c_type in self.dtype_wrapper:
-            if dtype == np_type:
-                dt_id = i
-                break
-            i += 1
         np_array = np_array.reshape(size)
 
-
+        logging.debug("%s: writing to shared memory" % (self.name,))  
         with self.smem_data.get_lock():
-            print np_array.size
-            print np_array.shape
-            print len(self.smem_data[:size])
-            for i in xrange(size):
-                self.smem_data[i] = np_array[i]
+            self.smem_data[:size] = np_array[:]
         with self.smem_shape.get_lock():
             self.smem_shape[:len(shape)] = shape[:]
         with self.smem_dtype.get_lock():
-            self.smem_dtype = dt_id
+            self.smem_dtype.value = dt_id
+        logging.debug("%s: shared memory copy complete" % (self.name,))  
 
     def getData(self, fname):
         return np.load(os.path.join(self.indir, fname))
 
     def run(self):  
+        logging.info("%s: Starting " % (self.name,)) 
         old_md5 = '0'
+        #get file name for import
         fname = self.instruction_queue.get()
-        new_md5 = fname.split('_')[-1]
-        print "nm", new_md5
-        old_dcount = -1
+        new_md5 = self.getMD5(fname)
+        logging.debug("%s: loading file <%s>" %(self.name, fname))
         data = self.getData(fname)
-        print "a: evt_add_data", self.evt_add_data.is_set()
-        print fname
-        while self.evt_add_data.wait():
-            print "loading data into mem"
-            self.loadMem( data ) 
-            print "clearing add data"
-            self.evt_add_data.clear()
-            self.evt_data_ready.set()
-
-            fname = self.instruction_queue.get()
-            old_md5 = new_md5
-            new_md5 = dname.split('_')[-1]
-            
-            if new_md5 != old_md5:
-                data = self.getData(fname)
-    
+        logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
+        while self.evt_add_data.wait(self._ad_timeout):
+            if self.evt_add_data.is_set():
+                logging.debug("%s: loading data into mem " % (self.name,)) 
+                self.loadMem( data ) 
+                logging.debug("%s: clearing evt_add_data"  % (self.name, ))
+                self.evt_add_data.clear()
+                logging.debug("%s: setting evt_data ready"  % (self.name, ))
+                self.evt_data_ready.set()
+                logging.debug("%s: getting new file " % (self.name, )) 
+                fname = None
+                while fname is None:
+                    try:
+                        fname = self.instruction_queue.get(True, self._iq_timeout) 
+                    except Empty:
+                        logging.debug("%s: fname timed out " % (self.name, ))
+                        if self.evt_die.is_set():
+                            logging.info("%s: exiting... " % (self.name,) )  
+                            return
+                logging.debug("%s: new file <%s>" %(self.name, fname))
+                old_md5 = new_md5
+                new_md5 = self.getMD5(fname)
+                if new_md5 != old_md5:
+                    data = self.getData(fname)
+                    logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
+                else:
+                    logging.debug("%s: same data, recycle reduce reuse"  % (self.name, ))
+            elif self.evt_die.is_set():
+                logging.info("%s: exiting... " % (self.name,) )  
+                return
+    def getMD5(self, fname):
+        """
+        Given a formatted filename, returns the precalculated md5 (really any kind of tag)
+        """
+        return fname.split('_')[-1]
             
 def testLoader():
     dtype_wrapper = [(np.float32, ctypes.c_float), (np.float, ctypes.c_double), (np.uint32, ctypes.c_uint), (np.uint, ctypes.c_ulonglong)]
     bdir = '/scratch/sgeadmin/'
-    a = np.random.rand(20,50).astype(np.float32)
-    f_hash = hashlib.sha1(a).hexdigest()
-    fname = '_'.join(['mf', str(random.randint(1000,10000)), f_hash])
-    with open(os.path.join(bdir,fname),'wb') as f:
-        np.save(f,a)
-
+    np_list = []
     inst_q = Queue()
-    inst_q.put(fname)
+    
+    for i in range(10):
+        a = np.random.rand(20,50).astype(np.float32)
+        f_hash = hashlib.sha1(a).hexdigest()
+        fname = '_'.join(['mf', str(random.randint(1000,10000)), f_hash])
+        with open(os.path.join(bdir,fname),'wb') as f:
+            np.save(f,a)
+
+        inst_q.put(fname)
+        inst_q.put(fname)
+        np_list.append(a)
+        
     evt_add_data = Event()
     evt_add_data.clear()
     evt_data_ready = Event()
     evt_data_ready.clear()
+    evt_die = Event()
+    evt_die.clear()
+    
     smem_data = Array(ctypes.c_float, a.size *4)
     smem_shape = Array(ctypes.c_longlong, 2)
     smem_dtype = Value('i',0)
     indir = bdir
     print "starting"
-    l = Loader(inst_q,evt_add_data, evt_data_ready, smem_data, smem_shape, smem_dtype, indir)
+    l = Loader( inst_q,evt_add_data, evt_data_ready,evt_die, smem_data, smem_shape, smem_dtype, indir, name="testname")
     l.start()
-    
-    print "setting data"
     evt_add_data.set()
-    print "evt_add_data", evt_add_data.is_set()
-    print "set"
-    
-    print "evt_data_ready", evt_data_ready.is_set()
-    evt_data_ready.wait()
-    myshape = np.frombuffer(smem_shape.get_obj(),dtype=int)
-    size = myshape[0]*myshape[1]
-    a_copy =  np.frombuffer(smem_data.get_obj(), dtype=dtype_wrapper[smem_dtype.value][0])
-    
-    a_copy = a_copy[:size]
-    a_copy = a_copy.reshape((myshape[0],myshape[1]))
+    for a in np_list:
+        for i in range(2):        
+            print "setting data"
+            print "evt_add_data", evt_add_data.is_set()
+            print "set"
+            
+            print "evt_data_ready", evt_data_ready.is_set()
+            evt_data_ready.wait()
+            evt_data_ready.clear()
+            myshape = np.frombuffer(smem_shape.get_obj(),dtype=int)
+            size = myshape[0]*myshape[1]
+            a_copy =  np.frombuffer(smem_data.get_obj(), dtype=dtypes.nd_list[smem_dtype.value])
+            evt_add_data.set() 
+            a_copy = a_copy[:size]
+            a_copy = a_copy.reshape((myshape[0],myshape[1]))
 
-    print np.allclose(a, a_copy)
-    l.terminate()
+            print "Matches", np.allclose(a, a_copy)
 
+    evt_die.set()
+    time.sleep(15)
+    l.join()
+    print "exitted gracefully"
 
 
 
@@ -602,9 +642,18 @@ def initLogging(lname,level):
     logging.basicConfig(filename=os.path.join(logdir,lname), level=level, format=log_format)
     logging.info("Starting")
 
-
+def sendLogSO():
+    root = logging.getLogger()
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    root.addHandler(ch)
 
 if __name__ == "__main__":
+    initLogging("tcdirac_gpu_mptest.log", logging.DEBUG)
+    sendLogSO()
+
     testLoader()
     """
     sqs_d2g = 'tcdirac-togpu-00'
