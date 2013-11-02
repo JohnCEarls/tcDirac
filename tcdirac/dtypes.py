@@ -57,9 +57,9 @@ uint32 = np.dtype('uint32')
 int64 = np.dtype('int64')
 uint64 = np.dtype('uint64')
   
-  
 float32 = np.dtype('float32')
 float64 = np.dtype('float64')
+
 complex64 = np.dtype('complex64')
 complex128 = np.dtype('complex128')
 
@@ -78,13 +78,9 @@ float32,
 float64,
 complex64,
 complex128]
+
 nd_dict = dict([(tpe,i) for i,tpe in enumerate(nd_list)])
   
-  
-float32 = np.dtype('float32')
-float64 = np.dtype('float64')
-complex64 = np.dtype('complex64')
-complex128 = np.dtype('complex128')
   
 def is_float(dtype):
   return dtype.type in np.sctypes['float']
@@ -133,6 +129,8 @@ def to_ctypes(dtype):
   """
   if dtype in _to_ctypes:
     return _to_ctypes[dtype]
+  elif np.dtype(dtype) in _to_ctypes:
+    return _to_ctypes[np.dtype(dtype)]
   else:
     raise RuntimeError("No conversion from %s to ctypes" % dtype)
   
