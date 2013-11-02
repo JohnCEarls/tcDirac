@@ -190,9 +190,16 @@ class LoaderBoss:
         self.file_q = file_q
         self.indir = indir
         self.base_name = base_name
+        self.data_settings = data_settings
         self.loaders = self._createLoaders('_'.join(['proc',base_name]), data_settings)
         self.loader_dist = self._createLoaderDist()
 
+    def empty(self):
+        """
+        Returns true if no new data and all present data has been used
+        """
+        a_loader=self.loaders[self.data_settings[0][0]]
+        return self.file_q.empty() and a_loader.q.empty() and a_loader.events['add_data'].is_set() and not a_loader.events['data_ready'].is_set()
 
     def _createLoaderDist(self):
         self._ld_die_evt = Event()
@@ -245,7 +252,6 @@ class LoaderBoss:
         return events
 
     def set_add_data(self):
-        print "setting add data"
         for v in self.loaders.itervalues():
             v.events['add_data'].set()
 
@@ -262,7 +268,6 @@ class LoaderBoss:
             self.killAll()
             return False
         else:
-            print "data ready"
             return True
 
 
@@ -374,11 +379,8 @@ class Loader(Process):
         logging.debug("%s: loading file <%s>" %(self.name, fname))
         data = self.getData(fname)
         logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
-        print "boppity",self.evt_add_data.is_set()
-        print "to", self._ad_timeout
         while True:
             self.evt_add_data.wait(self._ad_timeout)
-            print "bibity", self.evt_add_data.is_set()
             if self.evt_add_data.is_set():
                 logging.debug("%s: loading data into mem " % (self.name,)) 
                 self.loadMem( data ) 
@@ -407,7 +409,6 @@ class Loader(Process):
             elif self.evt_die.is_set():
                 logging.info("%s: exiting... " % (self.name,) )  
                 return
-        print "outa_here"
 
     def getMD5(self, fname):
         """
@@ -448,18 +449,13 @@ def testLoader(pid=0):
         np_list.append(orig)
     
     db = LoaderBoss(str(pid),inst_q,bdir,data_settings)
-    
     db.start()
-    print "shite"
     db.set_add_data()
     for a in np_list:
         for i in range(2):
             db.wait_data_ready()                   
-            print "got data ready"
             db.clear_data_ready()
-            print "clearing data ready"
             for k,v in a.iteritems():
-                print "a"
                 ml = db.loaders[k]
                 
 
@@ -469,11 +465,15 @@ def testLoader(pid=0):
                 a_copy = a_copy[:size]
                 a_copy = a_copy.reshape((myshape[0],myshape[1]))
                 
-                print "Matches", np.allclose(a[k], a_copy)
+                logging.info( "Tester: Copy Matches %s" % (str(np.allclose(a[k], a_copy)),))
             db.set_add_data()
-
+            
+    while not db.empty():
+        
+        time.sleep(.5)
+    logging.info( "Tester: no data, all processed, killing sp")
     db.killAll()
-    print "exitted gracefully"
+    logging.info( "Tester: exitted gracefully")
 
 
 class GPUBase:
@@ -789,11 +789,11 @@ if __name__ == "__main__":
     initLogging("tcdirac_gpu_mptest.log", logging.DEBUG)
     sendLogSO()
     temp = []
-    for i in range(10):
+    for i in range(1):
         p = Process(target=testLoader, args=(i,))
         temp.append(p)
         p.start()
-    for p in temp():
+    for p in temp:
         p.join()
     
     """
