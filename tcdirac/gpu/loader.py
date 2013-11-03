@@ -33,6 +33,8 @@ import pycuda.driver as cuda
 import tcdirac.dtypes as dtypes
 from tcdirac.gpu import processes
 
+from results import PackerBoss
+
 
 def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
         """
@@ -142,6 +144,12 @@ class LoaderBoss:
         Returns true if no new data and all present data has been used
         """
         a_loader=self.loaders[self.data_settings[0][0]]
+        logging.debug("%s: Empty <fq:%s >"%(self.base_name, str(self.file_q.empty())))
+        for k, a_loader in self.loaders.iteritems():
+            logging.debug("%s: empty loader <%s>" % (self.base_name, k))
+            logging.debug("%s: Empty <loader q:%s >"%(self.base_name, str(a_loader.q.empty())))
+            logging.debug("%s: Empty <ad:%s >"%(self.base_name, str(a_loader.events['add_data'].is_set())))
+            logging.debug("%s: Empty <not dr:%s >"%(self.base_name, str(not a_loader.events['data_ready'].is_set())))
         return self.file_q.empty() and a_loader.q.empty() and a_loader.events['add_data'].is_set() and not a_loader.events['data_ready'].is_set()
 
     def start(self):
@@ -176,7 +184,7 @@ class LoaderBoss:
         for v in self.loaders.itervalues():
             v.events['data_ready'].clear()
 
-    def wait_data_ready(self, timeout=3):
+    def wait_data_ready(self, time_out=3):
         """
         Waits for all loaders to have data ready.
         If any times out, returns False
@@ -184,7 +192,7 @@ class LoaderBoss:
         """
         ready = True
         for v in self.loaders.itervalues():
-            if not v.events['data_ready'].wait(timeout):
+            if not v.events['data_ready'].wait(time_out):
                 ready = False
         return ready
 
@@ -228,6 +236,8 @@ class LoaderBoss:
         shared_mem = {}
         shared_mem['data'] = Array(dtypes.to_ctypes(dtype),dsize )
         shared_mem['shape'] = Array(dtypes.to_ctypes(np.int64), 2)
+        for i in xrange(len(shared_mem['shape'])):
+            shared_mem['shape'][i] = 0
         shared_mem['dtype'] = Value('i',dtypes.nd_dict[np.dtype(dtype)])
         return shared_mem
 
@@ -456,10 +466,11 @@ class Loader(Process):
             
 def testLoader(pid=0):
     bdir = '/scratch/sgeadmin/'
+    odir = '/scratch/sgeadmin/'
     np_list = []
     inst_q = Queue()
-    data_settings = [('exp', 200*20000, np.float32), ('sm',5*200, np.uint32)]
-    
+    results_q = Queue()
+    check_cp = False #check whether in == out, if False, comparing speed
     """
             events = dict of mp events
                 events['add_data'] mp event, true means add data 
@@ -495,29 +506,61 @@ def testLoader(pid=0):
         data_settings.append((k, b, dtype[k]))
  
     db = LoaderBoss(str(pid),inst_q,bdir,data_settings)
+    pb = PackerBoss(str(pid), results_q, odir, (dsize['em'], dtype['em']) )
     db.start()
+    pb.start()
     db.set_add_data()
     for f_dict in check_list:
-        db.wait_data_ready()                   
+        while not db.wait_data_ready(time_out=4):
+            print "chillin"
+            pass
         db.clear_data_ready()
         
         for k,v in f_dict.iteritems():
             if k != 'file_id':
                 sdata = db._get_loader_data(k)
-                compare_data = np.load(os.path.join( bdir, v ))
-                logging.info( "Tester: Copy Matches %s" % (str(np.allclose(sdata, compare_data)),))
+                if check_cp:
+                    compare_data = np.load(os.path.join( bdir, v ))
+                   
+                    logging.info( "Tester: Copy Matches %s" % (str(np.allclose(sdata, compare_data)),))
                 db._release_loader_data(k)
                 db.set_add_data(k)
-            else:
+                logging.debug("tester: set add data<%s>" % k)
+                
+            elif False:#leaving this to allow testing of Packer Boss
+                #should prob separate tests
                 assert db.get_file_id() == v, "Out of order"
-            
+    if not db.loaders['em'].events['add_data'].is_set():
+        raise Exception("Fuck you Jobu")
     while not db.empty():
+        print "not empty"
         time.sleep(.5)
+    for f_dict in check_list:
+        while True:
+            if pb.ready():
+                print "Tester: packer running"
+                compare_data = np.load(os.path.join( bdir, f_dict['em'] ))
+                cdata = compare_data.flatten()
+                sm = pb.get_mem()
+                sm[:len(cdata)] = cdata[:]
+                b_shape = compare_data.shape
+                true_shape =  tuple( map(lambda x: x/2, compare_data.shape) )
+                pb.set_meta(db.get_file_id(), b_shape, cdata.dtype, true_shape )
+                pb.release()
+                break
+            else:
+                print "Tester: packer not ready"
+                time.sleep(.1)
+
     logging.info( "Tester: no data, all processed, killing sp")
     db.kill_all()
     time.sleep(10)
     db.clean_up()
-    
+    pb.kill()
+    pb.clean_up()
+    while not results_q.empty():
+        print results_q.get()
+ 
     logging.info( "Tester: exitted gracefully")
     
 
