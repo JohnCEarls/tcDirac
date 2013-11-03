@@ -294,6 +294,20 @@ class RankMatchingScores:
             cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
             self.res_data = np.empty(( self.res_nnets, self.res_nsamples), dtype = res_dtype)
             self.res_data[:,:] = self.buffer_data[:self.res_nnets, :self.res_nsamples]
+
+class SharedRankMatchingScores(RankMatchingScores):
+    """
+    RMS written to shared memory
+    """
+    def toGPU( samples_block_size, nets_block_size, buff_dtype=np.float32):
+        self.gpu_data = cuda.mem_alloc( self.gpu_mem( samples_block_size, nets_block_size, buff_dtype) )
+        self.buffer_nsamples = int(math.ceil(float(self.res_nsamples)/samples_block_size))* samples_block_size
+        self.buffer_nnets = int(math.ceil(float(self.res_nnets)/nets_block_size))*nets_block_size
+
+    def fromGPU(self, shared):
+        cuda.memcpy_dtoh( shared, self.gpu_data )
+
+
         
 if __name__ == "__main__":
     import pandas
