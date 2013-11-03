@@ -1,8 +1,13 @@
+
 import sys
+
+import inspect, os, os.path
+if os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))) == '/home/sgeadmin/hdproject/tcDirac/tcdirac/gpu':
+    #if we are running this from dev dir, need to add tcdirac to the path
+    sys.path.append('/home/sgeadmin/hdproject/tcDirac')
+
 import errno
 import time
-import os
-import os.path
 import logging
 import itertools
 from tempfile import TemporaryFile
@@ -26,10 +31,70 @@ import pandas
 import pycuda.driver as cuda
 
 import tcdirac.dtypes as dtypes
-from gpu import processes
+from tcdirac.gpu import processes
 
+
+def killAll(base_name, loaders, _ld_die_evt, loader_dist, file_q):
+        """
+        Kills all subprocesses
+        """
+        logging.debug("%s-terminator: Killing subprocesses"%(base_name))
+        temp_l = None
+        for l in loaders.itervalues():
+            l.die()
+            temp_l = l
+        _ld_die_evt.set()
+        dead = False
+        count = 1
+        while not dead:
+            time.sleep(1)
+            dead = True 
+            if _ld_die_evt.is_set():
+                dead = False
+            for l in loaders.itervalues():
+                if l.events['die'].is_set():
+                    dead = False
+            if count >= 10:
+                logging.error("%s-terminator: Unable to clear queues")
+                return
+        #put back unused data
+        while not temp_l.q.empty():
+            temp_d = {}
+            t_check = []
+            for k, a_loader in loaders.iteritems():
+                if not a_loader.q.empty():
+                    fname = a_loader.q.get()
+                    part, rn, a_hash = fname.split('_')
+                    t_check.append(rn)
+                    temp_d[k] = fname
+            failed = False
+        
+            for r in t_check[1:]:
+                if r!=t_check[0]:
+                    #order got screwed up. lost data
+                    failed = True
+            
+            
+            if not failed and len(t_check) == 4:
+                logging.debug( "terminator: recycling")
+                file_q.put( temp_d )
+            else:
+                logging.error( "terminator: data out of order [%s]" % (','.join(temp_d.itervalues()),))
 
 class LoaderBoss:
+    """
+    Object for initializing and interacting with the data loading modules
+    base_name - a name for this set of loaders
+    file_q - a queue for passing file names to the loaders.
+    indir - the directory holding the data to be loaded
+    data_settings - a list of tuples of the form (name, buffer size, data type)
+        for example, [('exp', 200*20000, np.float32), ('sm',5*200, np.uint32),...]
+        the names expected should be 
+            'em' - expression matrix, 
+            'gm' - gene map,
+            'sm' - sample map,
+            'nm' - network map
+    """
     def __init__(self, base_name, file_q,indir,data_settings):
         self.file_q = file_q
         self.indir = indir
@@ -37,6 +102,31 @@ class LoaderBoss:
         self.data_settings = data_settings
         self.loaders = self._createLoaders('_'.join(['proc',base_name]), data_settings)
         self.loader_dist = self._createLoaderDist()
+        self._terminator = Process( target=killAll, args=(self.base_name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
+    
+    def get_expression_matrix(self):
+        return self._get_loader_data('em')
+
+    def get_gene_map(self):
+        return self._get_loader_data('gm')
+
+    def get_sample_map(self):
+        return self._get_loader_data('sm')
+
+    def get_network_map(self):
+        return self._get_loader_data('nm')
+
+    def release_expression_matrix(self):
+        return self._release_loader_data('em')
+
+    def release_gene_map(self):
+        return self._release_loader_data('gm')
+
+    def release_sample_map(self):
+        return self._release_loader_data('sm')
+
+    def release_network_map(self):
+        return self._release_loader_data('nm')
 
     def empty(self):
         """
@@ -44,6 +134,65 @@ class LoaderBoss:
         """
         a_loader=self.loaders[self.data_settings[0][0]]
         return self.file_q.empty() and a_loader.q.empty() and a_loader.events['add_data'].is_set() and not a_loader.events['data_ready'].is_set()
+
+    def start(self):
+        """
+        Starts the worker subprocesses
+        """
+        for l in self.loaders.itervalues():
+            l.start()
+        self.loader_dist.start()
+
+    def killAll(self):
+        """
+        Kills all subprocesses
+        """
+        self._terminator.start()
+
+    def set_add_data(self):
+        """
+        Tells loaders to add next data
+        """
+        for v in self.loaders.itervalues():
+            v.events['add_data'].set()
+
+    def clear_data_ready(self):
+        """
+        Clears data ready, this means the data in shared memory is either being written to
+        or has been read from.
+        """
+        for v in self.loaders.itervalues():
+            v.events['data_ready'].clear()
+
+    def wait_data_ready(self, timeout=3):
+        """
+        Waits for all loaders to have data ready.
+        If any times out, returns False
+        Otherwise True
+        """
+        ready = True
+        for v in self.loaders.itervalues():
+            if not v.events['data_ready'].wait(timeout):
+                ready = False
+        return ready
+
+    def processes_running(self):
+        """
+        Returns True if all subprocesses are alive
+        """
+        pr = True
+        for v in self.loaders.itervalues():
+            if not v.process.is_alive():
+                pr = False
+        if not self.loader_dist.is_alive():
+            pr = False
+        return pr
+
+    def _release_loader_data(self, key):
+        return self.loaders[key].release_data()
+
+    def _get_loader_data(self, key):
+        return self.loaders[key].get_data()
 
     def _createLoaderDist(self):
         self._ld_die_evt = Event()
@@ -54,24 +203,6 @@ class LoaderBoss:
         for name, dsize, dtype in data_settings:
             loaders[name] = self._createLoader( '_'.join([base_name,name]), dsize, dtype )
         return loaders
-
-
-    def start(self):
-        for l in self.loaders.itervalues():
-            l.start()
-        self.loader_dist.start()
-
-    def killAll(self):
-        logging.debug("%s: Killing subprocesses"%(self.base_name))
-        for l in self.loaders.itervalues():
-            l.die()
-            l.process.join()
-        logging.debug("%s: loaders joined"%(self.base_name))
-        self._ld_die_evt.set()
-        self.loader_dist.join()
-        logging.debug("%s: loader_dist joined"%(self.base_name))
-        
-
 
     def _createLoader(self,name, dsize, dtype):
         smem = self._create_shared(dsize, dtype)
@@ -95,28 +226,30 @@ class LoaderBoss:
         events['die'] = Event()
         return events
 
-    def set_add_data(self):
-        for v in self.loaders.itervalues():
-            v.events['add_data'].set()
+    def clean_up(self):
+        logging.debug("%s: Cleaning up subprocesses"%(self.base_name))
+        temp_l = None
+        for l in self.loaders.itervalues():
+            if l.process.is_alive():
+                l.process.terminate()
+            l.process.join()
+            temp_l = l
+        logging.debug("%s: loaders joined"%(self.base_name))
+      
+        if self.loader_dist.is_alive():
+            self.loader_dist.terminate()
+        self.loader_dist.join()
+        logging.debug("%s: loader_dist joined"%(self.base_name))
+        if self._terminator.is_alive():
+            self._terminator.terminate()
+        self._terminator.join()
 
-    def clear_data_ready(self):
-        for v in self.loaders.itervalues():
-            v.events['data_ready'].clear()
-
-    def wait_data_ready(self):
-        ready = True
-        for v in self.loaders.itervalues():
-            if not v.events['data_ready'].wait(10):
-                ready = False
-        if not ready:
-            self.killAll()
-            return False
-        else:
-            return True
-
-
+    
 
 class LoaderStruct:
+    """
+    Simple ds for interacting with loader subprocesses
+    """
     def __init__(self,name,shared_mem,events,file_q,process=None):
         self.name = name
         self.shared_mem = shared_mem
@@ -125,12 +258,54 @@ class LoaderStruct:
         self.process = process
 
     def start(self):
+        """
+        Starts subprocess
+        """
         for e in self.events.itervalues():
             e.clear()
         self.process.start()
 
     def die(self):
+        """
+        informs subprocess it is time to die
+        """
         self.events['die'].set()
+
+    def get_data(self):
+        """
+        Returns the np array wrapping the shared memory
+        Note: when done with the data, you must call release_data()
+            a lock on the shared memory is acquired
+        """
+        shared_mem = self.shared_mem
+        for m in shared_mem.itervalues():
+            l = m.get_lock()
+            l.acquire()
+        myshape = np.frombuffer(shared_mem['shape'].get_obj(),dtype=int)
+        t_shape = []
+        N = 1
+        for i in myshape:
+            if i > 0:
+                t_shape.append(i)
+                N = N * i
+        t_shape = tuple(t_shape)
+        #Note: this is not a copy, it is a view
+        #test with np.may_share_memory or data.ctypes.data
+        data =  np.frombuffer(shared_mem['data'].get_obj(), dtype=dtypes.nd_list[shared_mem['dtype'].value])
+        data = data[:N]
+        data = data.reshape(t_shape)
+        return data
+
+    def release_data(self):
+        """
+        Releases lock on shared memory
+            throws assertion error if lock not held by process
+        """
+        shared_mem = self.shared_mem
+        for m in shared_mem.itervalues():
+            l = m.get_lock()
+            l.release()
+
 
 class LoaderDist(Process):
     """
@@ -148,7 +323,7 @@ class LoaderDist(Process):
         while not self.evt_death.is_set():
             try:
                 if self.proto_q.qsize() < 10 + random.randint(2,10):
-                    f_name = self.in_q.get(True, 10)
+                    f_name = self.in_q.get(True, 3)
                     logging.debug("%s: distributing <%s>" % ( self.name, f_name) )
                     for k,v in self.loaders.iteritems():
                         v.q.put("%s_%s" % (k, f_name))
@@ -158,14 +333,14 @@ class LoaderDist(Process):
             except Empty:#thrown by in_#thrown by in_qq
                 logging.debug("%s: starving..."%self.name)
                 pass
+        self.evt_death.clear()
         logging.info("%s: exiting..." % (self.name,))
         
     
-
 class Loader(Process):
     def __init__(self, inst_q, events, shared_mem, indir, name, add_data_timeout=10, inst_q_timeout=3):
         """
-            inst_q mp queue that tells process next file name
+            inst_q = mp queue that tells process next file name
             events = dict of mp events
                 events['add_data'] mp event, true means add data 
                 events['data_ready'] mp event, true means data is ready to be consumed
@@ -240,6 +415,7 @@ class Loader(Process):
                     except Empty:
                         logging.debug("%s: fname timed out " % (self.name, ))
                         if self.evt_die.is_set():
+                            self.evt_die.clear()
                             logging.info("%s: exiting... " % (self.name,) )  
                             return
                 logging.debug("%s: new file <%s>" %(self.name, fname))
@@ -251,6 +427,7 @@ class Loader(Process):
                 else:
                     logging.debug("%s: same data, recycle reduce reuse"  % (self.name, ))
             elif self.evt_die.is_set():
+                self.evt_die.clear()
                 logging.info("%s: exiting... " % (self.name,) )  
                 return
 
@@ -259,6 +436,7 @@ class Loader(Process):
         Given a formatted filename, returns the precalculated md5 (really any kind of tag)
         """
         return fname.split('_')[-1]
+
             
 def testLoader(pid=0):
     bdir = '/scratch/sgeadmin/'
@@ -277,7 +455,7 @@ def testLoader(pid=0):
                 shared_mem['dtype'] = shared memory for np array dtype
     """
 
-    for i in range(100):
+    for i in range(10):
         a = np.random.rand(20,50).astype(np.float)
         f_hash = hashlib.sha1(a).hexdigest()
         base = '_'.join( [  str(random.randint(1000,10000)), f_hash] )
@@ -301,33 +479,30 @@ def testLoader(pid=0):
             db.clear_data_ready()
             for k,v in a.iteritems():
                 ml = db.loaders[k]
-                
-
-                myshape = np.frombuffer(ml.shared_mem['shape'].get_obj(),dtype=int)
-                size = myshape[0]*myshape[1]
-                a_copy =  np.frombuffer(ml.shared_mem['data'].get_obj(), dtype=dtypes.nd_list[ml.shared_mem['dtype'].value])
-                a_copy = a_copy[:size]
-                a_copy = a_copy.reshape((myshape[0],myshape[1]))
-                
+                a_copy = db.loaders[k].get_data()
                 logging.info( "Tester: Copy Matches %s" % (str(np.allclose(a[k], a_copy)),))
+                db.loaders[k].release_data()
             db.set_add_data()
             
     while not db.empty():
-        
         time.sleep(.5)
     logging.info( "Tester: no data, all processed, killing sp")
     db.killAll()
+    time.sleep(10)
+    db.clean_up()
+    
     logging.info( "Tester: exitted gracefully")
+    
 
 if __name__ == "__main__":
-    sys.path.append('/home/sgeadmin/hdproject/tcDirac/tcdirac')
-    print sys.path
-    tcdirac.debug.initLogging("tcdirac_gpu_mptest.log", logging.DEBUG)
-    sendLogSO()
+    import tcdirac.debug
+    tcdirac.debug.initLogging("tcdirac_gpu_mptest.log", logging.DEBUG, st_out=True)
+    testLoader(1)
+    """
     temp = []
     for i in range(1):
         p = Process(target=testLoader, args=(i,))
         temp.append(p)
         p.start()
     for p in temp:
-        p.join()
+        p.join()"""
