@@ -34,9 +34,10 @@ import tcdirac.dtypes as dtypes
 from tcdirac.gpu import processes
 
 
-def killAll(base_name, loaders, _ld_die_evt, loader_dist, file_q):
+def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
         """
         Kills all subprocesses
+            called as subprocess by LoaderBoss in kill_all
         """
         logging.debug("%s-terminator: Killing subprocesses"%(base_name))
         temp_l = None
@@ -97,13 +98,21 @@ class LoaderBoss:
     """
     def __init__(self, base_name, file_q,indir,data_settings):
         self.file_q = file_q
+        self.id_q = Queue()
         self.indir = indir
         self.base_name = base_name
         self.data_settings = data_settings
-        self.loaders = self._createLoaders('_'.join(['proc',base_name]), data_settings)
-        self.loader_dist = self._createLoaderDist()
-        self._terminator = Process( target=killAll, args=(self.base_name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
-    
+        self.loaders = self._create_loaders('_'.join(['proc',base_name]), data_settings)
+        self.loader_dist = self._create_loader_dist()
+        self._terminator = Process( target=kill_all, args=(self.base_name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
+
+    def get_file_id(self):
+        """
+        returns the file id for the currently processed data
+            throws Queue.Empty, that means we are out of sync
+        """
+        return self.id_q.get(True, 3) 
+ 
     def get_expression_matrix(self):
         return self._get_loader_data('em')
 
@@ -143,18 +152,21 @@ class LoaderBoss:
             l.start()
         self.loader_dist.start()
 
-    def killAll(self):
+    def kill_all(self):
         """
         Kills all subprocesses
         """
         self._terminator.start()
 
-    def set_add_data(self):
+    def set_add_data(self, key=None):
         """
         Tells loaders to add next data
         """
-        for v in self.loaders.itervalues():
-            v.events['add_data'].set()
+        if key is None:
+            for v in self.loaders.itervalues():
+                v.events['add_data'].set()
+        else:
+            self.loaders[key].events['add_data'].set()
 
     def clear_data_ready(self):
         """
@@ -194,17 +206,17 @@ class LoaderBoss:
     def _get_loader_data(self, key):
         return self.loaders[key].get_data()
 
-    def _createLoaderDist(self):
+    def _create_loader_dist(self):
         self._ld_die_evt = Event()
-        return LoaderDist( '_'.join([self.base_name,'ld']), self.file_q,  self.loaders, self._ld_die_evt)
+        return LoaderDist( '_'.join([self.base_name,'ld']), self.file_q, self.id_q, self.loaders, self._ld_die_evt)
 
-    def _createLoaders(self, base_name, data_settings):
+    def _create_loaders(self, base_name, data_settings):
         loaders = {}
         for name, dsize, dtype in data_settings:
-            loaders[name] = self._createLoader( '_'.join([base_name,name]), dsize, dtype )
+            loaders[name] = self._create_loader( '_'.join([base_name,name]), dsize, dtype )
         return loaders
 
-    def _createLoader(self,name, dsize, dtype):
+    def _create_loader(self,name, dsize, dtype):
         smem = self._create_shared(dsize, dtype)
         evts = self._create_events()
         file_q = Queue()
@@ -311,11 +323,13 @@ class LoaderDist(Process):
     """
     takes in data from a single q and distributes it to loaders
     """
-    def __init__(self, name, in_q, loaders, evt_death):
+    def __init__(self, name, in_q, out_q, loaders, evt_death):
         Process.__init__(self, name=name)
         self.in_q = in_q
+        self.out_q = out_q
         self.loaders = loaders
         self.proto_q = loaders[loaders.keys()[0]].q
+        
         self.evt_death= evt_death
 
     def run(self):
@@ -323,10 +337,12 @@ class LoaderDist(Process):
         while not self.evt_death.is_set():
             try:
                 if self.proto_q.qsize() < 10 + random.randint(2,10):
-                    f_name = self.in_q.get(True, 3)
-                    logging.debug("%s: distributing <%s>" % ( self.name, f_name) )
+                    f_dict = self.in_q.get(True, 3)
+                    
+                    logging.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
+                    self.out_q.put(f_dict['file_id'])
                     for k,v in self.loaders.iteritems():
-                        v.q.put("%s_%s" % (k, f_name))
+                        v.q.put(f_dict[k])
                 else:
                     logging.debug("%s: sleeping due to full q"%self.name)
                     time.sleep(1)
@@ -368,7 +384,7 @@ class Loader(Process):
         self._iq_timeout = inst_q_timeout
 
 
-    def loadMem(self, np_array):
+    def _load_mem(self, np_array):
         """
         loads data from a numpy array into the provided shared memory
         """
@@ -386,7 +402,7 @@ class Loader(Process):
             self.smem_dtype.value = dt_id
         logging.debug("%s: shared memory copy complete" % (self.name,))  
 
-    def getData(self, fname):
+    def _get_data(self, fname):
         return np.load(os.path.join(self.indir, fname))
 
     def run(self):  
@@ -394,15 +410,15 @@ class Loader(Process):
         old_md5 = '0'
         #get file name for import
         fname = self.instruction_queue.get()
-        new_md5 = self.getMD5(fname)
+        new_md5 = self._get_md5(fname)
         logging.debug("%s: loading file <%s>" %(self.name, fname))
-        data = self.getData(fname)
+        data = self._get_data(fname)
         logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
         while True:
             self.evt_add_data.wait(self._ad_timeout)
             if self.evt_add_data.is_set():
                 logging.debug("%s: loading data into mem " % (self.name,)) 
-                self.loadMem( data ) 
+                self._load_mem( data ) 
                 logging.debug("%s: clearing evt_add_data"  % (self.name, ))
                 self.evt_add_data.clear()
                 logging.debug("%s: setting evt_data ready"  % (self.name, ))
@@ -420,9 +436,9 @@ class Loader(Process):
                             return
                 logging.debug("%s: new file <%s>" %(self.name, fname))
                 old_md5 = new_md5
-                new_md5 = self.getMD5(fname)
+                new_md5 = self._get_md5(fname)
                 if new_md5 != old_md5:
-                    data = self.getData(fname)
+                    data = self._get_data(fname)
                     logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
                 else:
                     logging.debug("%s: same data, recycle reduce reuse"  % (self.name, ))
@@ -431,7 +447,7 @@ class Loader(Process):
                 logging.info("%s: exiting... " % (self.name,) )  
                 return
 
-    def getMD5(self, fname):
+    def _get_md5(self, fname):
         """
         Given a formatted filename, returns the precalculated md5 (really any kind of tag)
         """
@@ -454,45 +470,97 @@ def testLoader(pid=0):
                 shared_mem['shape'] = shared memory for np array shape
                 shared_mem['dtype'] = shared memory for np array dtype
     """
+    dsize = {'em':0, 'gm':0, 'sm':0, 'nm':0}
+    dtype = {'em':np.float32, 'gm':np.uint32, 'sm':np.uint32,'nm':np.uint32}
+
+    check_list = []
 
     for i in range(10):
-        a = np.random.rand(20,50).astype(np.float)
-        f_hash = hashlib.sha1(a).hexdigest()
-        base = '_'.join( [  str(random.randint(1000,10000)), f_hash] )
-        orig = {}
-        for n, _, dtype in data_settings:
-            a = np.random.rand(20,50).astype(dtype)
-            fname = '_'.join([n, base])
-            orig[n] = a
-            with open(os.path.join(bdir,fname),'wb') as f:
-                np.save(f,a)
-        inst_q.put(base)
-        inst_q.put(base)
-        np_list.append(orig)
-    
+        f_dict = {}
+        fake = genFakeData( 200, 20000) 
+        for i in range(2):
+            f_dict['file_id'] = str(random.randint(1000,10000))
+            for k,v in fake.iteritems():
+                f_hash = hashlib.sha1(v).hexdigest()
+                f_name = '_'.join([ k, f_dict['file_id'], f_hash])
+                with open(os.path.join( bdir, f_name),'wb') as f:
+                    np.save(f, v)
+                if v.size > dsize[k]:
+                    dsize[k] = v.size
+                f_dict[k] = f_name
+            inst_q.put( f_dict )
+            check_list.append(f_dict)
+    data_settings = []
+    for k,b in dsize.iteritems():   
+        data_settings.append((k, b, dtype[k]))
+ 
     db = LoaderBoss(str(pid),inst_q,bdir,data_settings)
     db.start()
     db.set_add_data()
-    for a in np_list:
-        for i in range(2):
-            db.wait_data_ready()                   
-            db.clear_data_ready()
-            for k,v in a.iteritems():
-                ml = db.loaders[k]
-                a_copy = db.loaders[k].get_data()
-                logging.info( "Tester: Copy Matches %s" % (str(np.allclose(a[k], a_copy)),))
-                db.loaders[k].release_data()
-            db.set_add_data()
+    for f_dict in check_list:
+        db.wait_data_ready()                   
+        db.clear_data_ready()
+        
+        for k,v in f_dict.iteritems():
+            if k != 'file_id':
+                sdata = db._get_loader_data(k)
+                compare_data = np.load(os.path.join( bdir, v ))
+                logging.info( "Tester: Copy Matches %s" % (str(np.allclose(sdata, compare_data)),))
+                db._release_loader_data(k)
+                db.set_add_data(k)
+            else:
+                assert db.get_file_id() == v, "Out of order"
             
     while not db.empty():
         time.sleep(.5)
     logging.info( "Tester: no data, all processed, killing sp")
-    db.killAll()
+    db.kill_all()
     time.sleep(10)
     db.clean_up()
     
     logging.info( "Tester: exitted gracefully")
     
+
+def genFakeData( n, gn):
+    neighbors = random.randint(5, 20)
+    nnets = random.randint(50,300)
+
+    samples = map(lambda x:'s%i'%x, range(n))
+    genes = map(lambda x:'g%i'%x, range(gn))
+    g_d = dict([(gene,i) for i,gene in enumerate(genes)])
+    gm_text = []
+    gm_idx = []
+
+
+    exp = np.random.rand(len(genes),len(samples)).astype(np.float32)
+    exp_df = pandas.DataFrame(exp,dtype=float, index=genes, columns=samples)
+
+    net_map = [0]
+
+    for i in range(nnets):
+        n_size = random.randint(5,100)
+
+        net_map.append(net_map[-1] + scipy.misc.comb(n_size,2, exact=1))
+        net = random.sample(genes,n_size)
+        for g1,g2 in itertools.combinations(net,2):
+            gm_text.append("%s < %s" % (g1,g2))
+            gm_idx += [g_d[g1],g_d[g2]]
+
+    #data
+    expression_matrix = exp
+    gene_map = np.array(gm_idx).astype(np.uint32)
+    #print gene_map[:20]
+    sample_map = np.random.randint(low=0,high=len(samples), size=(len(samples),neighbors))
+    sample_map = sample_map.astype(np.uint32)
+    #print sample_map[:,:3]
+    network_map = np.array(net_map).astype(np.uint32)
+
+    data = {}
+    data['em'] = expression_matrix
+    data['gm'] = gene_map
+    data['sm'] = sample_map
+    data['nm'] = network_map
+    return data
 
 if __name__ == "__main__":
     import tcdirac.debug
