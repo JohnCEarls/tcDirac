@@ -51,6 +51,11 @@ class Expression:
         self.gpu_data = cuda.mem_alloc(self.buffer_data.nbytes)
         cuda.memcpy_htod(self.gpu_data, self.buffer_data)
 
+class SharedExpression(Expression):
+    def toGPU(self, sample_block_size, dtype=np.float):
+        self.gpu_data = cuda.mem_alloc(self.orig_data.nbytes)
+        cuda.memcpy_htod(self.gpu_data, self.orig_data)
+
 
 class SampleRankTemplate:
     def __init__(self, nsamples, npairs):
@@ -103,10 +108,15 @@ class SampleRankTemplate:
             self.res_data = np.empty((self.res_npairs, self.res_nsamples), dtype=res_dtype)
             self.res_data[:,:] = self.buffer_data[:self.res_npairs, :self.res_nsamples]
 
+class SharedSampleRankTemplate(SampleRankTemplate):
+    def __init__(self, nsamples, npairs):
+        SampleRankTemplate.__init__(self, nsamples,npairs)
 class RankTemplate(SampleRankTemplate):
     def __init__(self, nsamples, npairs):
         SampleRankTemplate.__init__(self, nsamples,npairs)
-
+class SharedRankTemplate(RankTemplate):
+    def __init__(self, nsamples, npairs):
+        RankTemplate.__init__(self, nsamples,npairs)
     
 class GeneMap:
     def __init__(self, orig_gmap):
@@ -143,6 +153,13 @@ class GeneMap:
 
         return (gm1,gm2)
 
+class SharedGeneMap(GeneMap):
+    def toGPU(self, pairs_block_size, buff_type=np.int32):
+        self.gpu_data = cuda.mem_alloc( self.orig_data.nbytes )
+        self.memcpy_htod(self.gpu_data, self.orig_data)
+
+    def split(self, partition_point):
+        raise Exception("No split for shared")
         
 class SampleMap:
     def __init__(self, orig_smap):
@@ -177,6 +194,11 @@ class SampleMap:
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod( self.gpu_data, self.buffer_data )
 
+class SharedSampleMap(SampleMap):
+    def toGPU(self,  samples_block_size, buff_dtype=np.int32):
+        self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
+        cuda.memcpy_htod( self.gpu_data, self.buffer_data )
+
 class SampleMapBin:
     """
     Sample map for binary dirac (i.e. 1-d vector of 1s and 0s)
@@ -206,7 +228,13 @@ class SampleMapBin:
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod( self.gpu_data, self.buffer_data )
 
+class SharedSampleMapBin(SampleMapBin):
+    def toGPU(self,  samples_block_size, buff_dtype=np.int32):
+        self.gpu_data = cuda.mem_alloc( self.orig_data.nbytes )
+        cuda.memcpy_htod( self.gpu_data, self.orig_data )
 
+    
+    
 class NetworkMap:
     """
     1-d array with offsets for each network
@@ -215,7 +243,6 @@ class NetworkMap:
     def __init__(self, orig_net_map):
         self.orig_data = orig_net_map
         self.orig_nnets = len(orig_net_map) - 1
-
 
         self.buffer_nnets = None
         self.buffer_data = None
@@ -233,13 +260,13 @@ class NetworkMap:
         self.buffer_data = np.zeros( (self.buffer_nnets+1,), dtype=buff_dtype)
         self.buffer_data[:len(self.orig_data)] = self.orig_data[:]
 
+
         
     def toGPU(self, nets_block_size, buff_dtype = np.int32):
         if self.buffer_data is None:
             self.createBuffer(nets_block_size, buff_dtype)
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod(self.gpu_data, self.buffer_data)
-
     def split(self):
         
         center = bisect.bisect(self.orig_data, self.orig_data[-1]/2)
@@ -258,7 +285,13 @@ class NetworkMap:
 
         return (part, nm1, nm2)
 
-        
+class SharedNetworkMap(NetworkMap):
+
+    def split(self):
+        raise Exception("No splits for Shared memory")
+    def toGPU(self, nets_block_size, buff_dtype = np.int32):
+        self.gpu_data = cuda.mem_alloc( self.orig_data.nbytes )
+        cuda.memcpy_htod(self.gpu_data, self.orig_data)
 
 class RankMatchingScores:
     def __init__(self, num_nets, nsamples):
@@ -299,13 +332,22 @@ class SharedRankMatchingScores(RankMatchingScores):
     """
     RMS written to shared memory
     """
+    def __init__(self, num_nets, nsamples):
+        self.res_data = None
+        self.res_nnets = num_nets
+        self.res_nsamples = nsamples
+
+        self.buffer_nnets = None
+        self.buffer_nsamples = None
+        self.buffer_data = None
+
+        self.gpu_data = None
+
     def toGPU( samples_block_size, nets_block_size, buff_dtype=np.float32):
         self.gpu_data = cuda.mem_alloc( self.gpu_mem( samples_block_size, nets_block_size, buff_dtype) )
-        self.buffer_nsamples = int(math.ceil(float(self.res_nsamples)/samples_block_size))* samples_block_size
-        self.buffer_nnets = int(math.ceil(float(self.res_nnets)/nets_block_size))*nets_block_size
 
-    def fromGPU(self, shared):
-        cuda.memcpy_dtoh( shared, self.gpu_data )
+    def fromGPU(self, shared_mem ):
+        cuda.memcpy_dtoh(shared_mem, self.gpu_data )
 
 
         

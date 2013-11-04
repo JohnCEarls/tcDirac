@@ -350,7 +350,7 @@ class LoaderDist(Process):
                     f_dict = self.in_q.get(True, 3)
                     
                     logging.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
-                    self.out_q.put(f_dict['file_id'])
+                    self.out_q.put(f_dict)
                     for k,v in self.loaders.iteritems():
                         v.q.put(f_dict[k])
                 else:
