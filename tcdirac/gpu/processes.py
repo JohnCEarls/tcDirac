@@ -5,7 +5,7 @@ import numpy as np
 from pycuda._driver import MemoryError
 import logging 
 
-def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,  rms_only=False, shared=False):
+def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,  rms_only=False):
 
     exp = data.Expression( expression_matrix )
 
@@ -19,10 +19,7 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
 
     nm = data.NetworkMap( network_map )
     
-    if shared:#note: on splits the shared memory is off, need to check if shared on return
-        rms = data.SharedRankMatchingScores( nm.orig_nnets, exp.orig_nsamples)
-    else:
-        rms = data.RankMatchingScores( nm.orig_nnets, exp.orig_nsamples)
+    rms = data.RankMatchingScores( nm.orig_nnets, exp.orig_nsamples)
 
     req_mem = reqMemory(exp, rms,np,rt,sm,srt,gm,nm, sample_block_size, nets_block_size, npairs_block_size )
     
