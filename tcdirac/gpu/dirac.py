@@ -11,8 +11,8 @@ def sampleRankTemplate( exp_gpu, gmap_gpu, srt_gpu, nsamp, npairs, pairs_block_s
 
     if debug:
         assert npairs%pairs_block_size == 0
-
         assert nsamp%sample_block_size == 0
+        print "dirac.debug is on"
     
     block = (pairs_block_size, sample_block_size, 1)
     grid = (npairs/pairs_block_size, nsamp/sample_block_size)

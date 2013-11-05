@@ -49,26 +49,38 @@ class Packer(Process):
 
     def run(self):
         self.events['add_data'].set()
+        wait_ctr = 0
         while True:
             self.events['data_ready'].wait(self._dr_timeout)
             if self.events['data_ready'].is_set():
                 mess = {}
-                file_id = self.in_q.get()
-                mess['file_id'] = file_id
-                data, true_shape = self.get_data()
-                #Note: this is not guaranteed to be unique, only part of array used
-                f_hash = hashlib.sha1(str(data)).hexdigest()
-                f_name = '_'.join([self.p_type, file_id, f_hash])
-                with open(os.path.join( self.out_dir, f_name), 'wb') as f:
-                    np.save(f, data)
-                mess['f_name'] = f_name
-                
-                self.release_data()
-               
-                self.events['data_ready'].clear()
-                self.events['add_data'].set()
-                mess['true_shape'] = true_shape
-                self.out_q.put(mess)
+                try:
+                    file_id = self.in_q.get(True, 3)
+                    mess['file_id'] = file_id
+                    data = self.get_data()
+                    #Note: this is not guaranteed to be unique, only part of array used
+                    #      do not want to wait for large matrix to be hashed
+                    f_hash = hashlib.sha1(str(data)).hexdigest()
+                    
+                    f_name = '_'.join([self.p_type, file_id, f_hash])
+                    with open(os.path.join( self.out_dir, f_name), 'wb') as f:
+                        logging.debug("%s: Packer writing <%s>" % (self.name, f_name))
+                        np.save(f, data)
+                    mess['f_name'] = f_name
+                    #data.fill(0) 
+                    self.release_data()
+                   
+                    self.events['data_ready'].clear()
+                    self.events['add_data'].set()
+                    self.out_q.put(mess)
+                    logging.debug("%s: file_id<%s> processed" % (self.name, file_id))
+                    wait_ctr = 0
+                except Empty:
+                    logging.debug("%s: waiting on file_id" % self.name)
+                    wait_ctr += 1
+                    if wait_ctr > 10:
+                        logging.error("%s: Packer has data but no file_id, irrecoverable" % self.name)
+                        raise Exception("%s: Packer has data but no file_id, irrecoverable" % self.name)
             elif self.events['die'].is_set():
                 self.events['die'].clear()
                 logging.info("%s: exiting..." % self.name)
@@ -103,18 +115,7 @@ class Packer(Process):
         data =  np.frombuffer(shared_mem['data'].get_obj(), dtype=dtypes.nd_list[shared_mem['dtype'].value])
         data = data[:N]
         data = data.reshape(t_shape)
-
-        myshape = np.frombuffer(shared_mem['true_shape'].get_obj(),dtype=int)
-        t_shape = []
-        N = 1
-        for i in myshape:
-            if i > 0:
-                t_shape.append(i)
-                N = N * i
-        true_shape = tuple(t_shape)
-        
-        
-        return data, true_shape
+        return data
 
 
 class PackerBoss:
@@ -131,12 +132,15 @@ class PackerBoss:
         self.out_dir = out_dir
         self.data_settings = data_settings
         b_size, dtype = data_settings
+        self.name = base_name
         self.packer = self._create_packer( 'p_' + base_name, b_size, dtype )
     
     def start(self):
+        logging.debug("%s: starting packer.." %(self.name))
         self.packer.start()
 
     def kill(self):
+        logging.debug("%s: killing packer.." %(self.name))
         self.packer.die()
 
     def ready(self):
@@ -146,15 +150,17 @@ class PackerBoss:
         self.packer.events['add_data'].clear()
         return self.packer.get_mem()
 
-    def set_meta(self, file_id, shape, dtype, true_shape):
+    def set_meta(self, file_id, shape, dtype):
         self.in_q.put(file_id)
-        self.packer.set_meta(shape, dtype, true_shape)
+        self.packer.set_meta(shape, dtype)
 
     def release(self):
         self.packer.release_mem()
         self.packer.events['data_ready'].set()
 
     def _create_packer(self, name, dsize, dtype, p_type='rms'):
+        
+        logging.debug("%s: creating packer.." %(self.name))
         sm = self._create_shared( dsize, dtype)
         ev = self._create_events()
         p = Packer(name,p_type, self.in_q, self.out_q, sm,ev, self.out_dir)
@@ -162,10 +168,17 @@ class PackerBoss:
         return ps
 
     def _create_shared(self, dsize, dtype):
+        logging.debug("%s: creating shared_memory.." %(self.name))
         shared_mem = {}
         shared_mem['data'] = Array(dtypes.to_ctypes(dtype),dsize )
+        with shared_mem['data'].get_lock():
+            temp = np.frombuffer(shared_mem['data'].get_obj(), dtype)
+            temp.fill(0)
         shared_mem['shape'] = Array(dtypes.to_ctypes(np.int64), 2)
-        shared_mem['true_shape'] = Array(dtypes.to_ctypes(np.int64), 2) 
+        with shared_mem['shape'].get_lock():
+            temp = np.frombuffer(shared_mem['shape'].get_obj(), np.int64)
+            temp.fill(0)
+
         shared_mem['dtype'] = Value('i',dtypes.nd_dict[np.dtype(dtype)])
         return shared_mem
 
@@ -177,7 +190,16 @@ class PackerBoss:
         return events
 
     def clean_up(self):
-        self.packer.process.join(10)
+        logging.debug("%s: cleaning up." %(self.name))
+        ctr = 0
+        while self.packer.process.is_alive() and ctr < 5:
+            time.sleep(1)
+            ctr += 1
+        if self.packer.process.is_alive():
+            logging.debug("%s: killing the hard way" %(self.name))
+            self.packer.process.terminate()
+        self.packer.process.join()
+        logging.debug("%s: This house is clean" %(self.name))
 
 
 class PackerStruct:
@@ -206,13 +228,11 @@ class PackerStruct:
         self.data_lock.acquire()
         return self.shared_mem['data']
 
-    def set_meta(self, shape, dtype, true_shape):
+    def set_meta(self, shape, dtype):
         with self.shared_mem['shape'].get_lock(): 
             self.shared_mem['shape'][:len(shape)] = shape[:]
         with self.shared_mem['dtype'].get_lock():
             self.shared_mem['dtype'].value = dtypes.nd_dict[np.dtype(dtype)]
-        with self.shared_mem['true_shape'].get_lock():
-            self.shared_mem['true_shape'][:len(true_shape)] = true_shape[:]
 
     def release_mem(self):
         self.data_lock.release()

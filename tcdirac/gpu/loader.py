@@ -139,6 +139,10 @@ class LoaderBoss:
     def release_network_map(self):
         return self._release_loader_data('nm')
 
+    def release_loader_data(self):
+        for l in self.loaders.keys():
+            self._release_loader_data(l)
+
     def empty(self):
         """
         Returns true if no new data and all present data has been used
@@ -347,8 +351,7 @@ class LoaderDist(Process):
         while not self.evt_death.is_set():
             try:
                 if self.proto_q.qsize() < 10 + random.randint(2,10):
-                    f_dict = self.in_q.get(True, 3)
-                    
+                    f_dict = self.in_q.get(True, 2)
                     logging.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
                     self.out_q.put(f_dict)
                     for k,v in self.loaders.iteritems():
@@ -412,6 +415,14 @@ class Loader(Process):
             self.smem_dtype.value = dt_id
         logging.debug("%s: shared memory copy complete" % (self.name,))  
 
+
+    def _clear_mem(self):
+
+        with self.smem_data.get_lock():
+            temp = np.frombuffer(self.smem_data.get_obj(), np.float32)
+            temp.fill(0)
+
+
     def _get_data(self, fname):
         return np.load(os.path.join(self.indir, fname))
 
@@ -448,6 +459,7 @@ class Loader(Process):
                 old_md5 = new_md5
                 new_md5 = self._get_md5(fname)
                 if new_md5 != old_md5:
+                    #self._clear_mem()
                     data = self._get_data(fname)
                     logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
                 else:

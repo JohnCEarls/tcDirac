@@ -7,9 +7,9 @@ import logging
 
 def runSharedDirac( exp, gm, sm, nm, sample_block_size, npairs_block_size, nets_block_size, rms_only=True):
 
-    srt = data.SharedSampleRankTemplate( exp.orig_nsamples, gm.orig_npairs )
-    rt = data.SharedRankTemplate( exp.orig_nsamples, gm.orig_npairs )
-    rms = data.SharedRankMatchingScores( nm.orig_nnets, exp.orig_nsamples )
+    srt = data.SharedSampleRankTemplate( exp.buffer_nsamples, gm.buffer_npairs )
+    rt = data.SharedRankTemplate( exp.buffer_nsamples, gm.buffer_npairs )
+    rms = data.SharedRankMatchingScores( nm.orig_nnets, exp.buffer_nsamples )
 
     try:
         exp.toGPU( sample_block_size )
@@ -23,15 +23,15 @@ def runSharedDirac( exp, gm, sm, nm, sample_block_size, npairs_block_size, nets_
         #we ran out of memory, maybe dev memory changed, in any case, 
         logging.error("*************MemoryERROR*********************")
         req_mem = reqMemory(exp, rms,np,rt,sm,srt,gm,nm, sample_block_size, nets_block_size, npairs_block_size )
-        logging.error("Splitting data from MemoryError")
+        logging.error("Shared Dirac")
         logging.error( "Req. Mem[%f], Avail. Mem[%f]" % (float(req_mem)/1073741824.0, float(cuda.mem_get_info()[0])/1073741824.0) )
         for d in [exp,rms, nm, rt, sm, srt, gm]:
             if d.gpu_data is not None:
                 d.gpu_data.free()
         raise
-    dirac.sampleRankTemplate( exp.gpu_data, gm.gpu_data, srt.gpu_data, exp.orig_nsamples, gm.orig_npairs, npairs_block_size, sample_block_size)
-    dirac.rankTemplate( srt.gpu_data, sm.gpu_data, rt.gpu_data, srt.orig_nsamples, sm.orig_kneighbors, gm.orig_npairs, npairs_block_size, sample_block_size)
-    dirac.rankMatchingScores( srt.gpu_data, rt.gpu_data, rms.gpu_data, nm.gpu_data, srt.orig_nsamples, nm.orig_nnets, sample_block_size, nets_block_size)
+    dirac.sampleRankTemplate( exp.gpu_data, gm.gpu_data, srt.gpu_data, exp.buffer_nsamples, gm.buffer_npairs, npairs_block_size, sample_block_size)
+    dirac.rankTemplate( srt.gpu_data, sm.gpu_data, rt.gpu_data, srt.buffer_nsamples, sm.buffer_kneighbors, gm.buffer_npairs, npairs_block_size, sample_block_size)
+    dirac.rankMatchingScores( srt.gpu_data, rt.gpu_data, rms.gpu_data, nm.gpu_data, srt.buffer_nsamples, nm.buffer_nnets, sample_block_size, nets_block_size)
     return (srt, rt, rms)
 
 def reqMemory(exp, rms,np,rt,sm,srt,gm,nm,sample_block_size, nets_block_size, npairs_block_size ):
@@ -46,6 +46,7 @@ def reqMemory(exp, rms,np,rt,sm,srt,gm,nm,sample_block_size, nets_block_size, np
 
 
 def testDirac(expression_matrix, gene_map, sample_map, network_map):
+    raise Exception("Unimplemented")
     srt = np.zeros((gene_map.shape[0]/2, expression_matrix.shape[1]))
     for i in range(expression_matrix.shape[1]):
         for j in range(gene_map.shape[0]/2):

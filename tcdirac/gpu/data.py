@@ -133,8 +133,8 @@ class SharedSampleRankTemplate(SampleRankTemplate):
         self.res_npairs = None
         self.res_data = None
 
-        self.buffer_nsamples = nsamples
-        self.buffer_npairs = npairs
+        self.res_nsamples = self.buffer_nsamples = nsamples
+        self.res_npairs = self.buffer_npairs = npairs
         self.buffer_data = None
         self.buffer_dtype = None
         
@@ -151,18 +151,24 @@ class SharedSampleRankTemplate(SampleRankTemplate):
     def toGPU(self, sample_block_size, pairs_block_size, buff_dtype=np.int32):
         self.buffer_dtype = buff_dtype
         self.gpu_data = cuda.mem_alloc(self.gpu_mem( sample_block_size, pairs_block_size,buff_dtype ) )
-        
-
     def fromGPU(self, res_dtype=np.double):
-        raise SharedException("Not Available")
+        if self.gpu_data is not None:
+            self.buffer_data = np.empty((self.buffer_npairs,self.buffer_nsamples), dtype = self.buffer_dtype)
+            cuda.memcpy_dtoh(self.buffer_data, self.gpu_data)
+            self.res_data = np.empty((self.res_npairs, self.res_nsamples), dtype=res_dtype)
+            self.res_data[:,:] = self.buffer_data[:self.res_npairs, :self.res_nsamples]
+      
+    """
+    def fromGPU(self, res_dtype=np.double):
+        raise SharedException("Not Available")"""
 
 class RankTemplate(SampleRankTemplate):
     def __init__(self, nsamples, npairs):
         SampleRankTemplate.__init__(self, nsamples,npairs)
 
-class SharedRankTemplate(SharedRankTemplate):
+class SharedRankTemplate(SharedSampleRankTemplate):
     def __init__(self, nsamples, npairs):
-        SharedRankTemplate.__init__(self, nsamples,npairs)
+        SharedSampleRankTemplate.__init__(self, nsamples,npairs)
     
 class GeneMap:
     def __init__(self, orig_gmap):
@@ -367,23 +373,35 @@ class NetworkMap:
 class SharedNetworkMap(NetworkMap):
 
     def __init__(self, orig_net_map):
+
         self.orig_data = None
-        self.orig_nnets = None
+        self.orig_nnets = self._get_orig_nnets(orig_net_map) 
 
         self.buffer_data = orig_net_map
-        self.buffer_nnets=  len(orig_net_map) - 1
+        self.buffer_nnets = len(orig_net_map) - 1
        
         self.gpu_data = None
 
+    def _get_orig_nnets(self, orig_net_map):
+        ctr = 1
+        lo = len(orig_net_map)
+        assert lo - ctr > 1, "%s %s"%(str(lo),str(ctr))
+            
+        while orig_net_map[lo - ctr]==0:
+            ctr += 1
+            assert lo - ctr > 1, "%s %s %s"%(str(lo),str(ctr),str(orig_net_map))
+        return lo - ctr
+
     def gpu_mem(self, nnets_block_size, dtype=np.int32):
         return self.buffer_data.nbytes
-
+    
 
     def createBuffer(self, nnets_block_size, buff_dtype=np.int32):
         raise SharedException("Not Available")
 
     def split(self):
         raise SharedException("No splits for Shared memory")
+
     def toGPU(self, nets_block_size, buff_dtype = np.int32):
         self.gpu_data = cuda.mem_alloc( self.buffer_data.nbytes )
         cuda.memcpy_htod(self.gpu_data, self.buffer_data)
@@ -441,11 +459,21 @@ class SharedRankMatchingScores(RankMatchingScores):
     def toGPU(self, samples_block_size, nets_block_size, buff_dtype=np.float32):
         self.gpu_data = cuda.mem_alloc( self.gpu_mem( samples_block_size, nets_block_size, buff_dtype) )
 
-    def fromGPU(self, shared_mem ):
-        cuda.memcpy_dtoh(shared_mem, self.gpu_data )
+    def fromGPU(self, shared_mem, buff_dtype=np.float32 ):
+        
+        buff = np.frombuffer(shared_mem.get_obj(), dtype=buff_dtype)
+        buff = buff[:self.buffer_nnets*self.buffer_nsamples]
+        buff = buff.reshape( (self.buffer_nnets, self.buffer_nsamples) )
+        """
+        self.res_data = np.zeros(( self.buffer_nnets, self.buffer_nsamples), dtype = buff_dtype)
+        cuda.memcpy_dtoh(self.res_data, self.gpu_data )
+        """
+        cuda.memcpy_dtoh(buff, self.gpu_data)
+        return buff
+        #print "All close", np.allclose( buff, self.res_data)
 
     def gpu_mem(self, samples_block_size, nets_block_size, dtype=np.float32):
-        return self.buffer_nnets*self.buffer_nsamplesb*dtype(1).nbytes
+        return self.buffer_nnets*self.buffer_nsamples*dtype(1).nbytes
 
     def createBuffer(self, samples_block_size, nets_block_size, buff_dtype=np.float32):
         raise SharedException("Not Available")
