@@ -5,29 +5,28 @@ import numpy as np
 from pycuda._driver import MemoryError
 import logging 
 
-def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,  rms_only=False):
-
+def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,rms_only=False ):
     exp = data.Expression( expression_matrix )
 
     gm = data.GeneMap( gene_map )
     
     srt = data.SampleRankTemplate( exp.orig_nsamples, gm.orig_npairs )
-    
+
     sm = data.SampleMap( sample_map )
     
     rt = data.RankTemplate( exp.orig_nsamples, gm.orig_npairs )
 
     nm = data.NetworkMap( network_map )
-    
+
     rms = data.RankMatchingScores( nm.orig_nnets, exp.orig_nsamples)
 
     req_mem = reqMemory(exp, rms,np,rt,sm,srt,gm,nm, sample_block_size, nets_block_size, npairs_block_size )
     
-    logging.info( "Req. Mem[%f], Avail. Mem[%f]" % (float(req_mem)/1073741824.0, float(cuda.mem_get_info()[0])/1073741824.0) )
+    logging.info( "Req. Mem[%f], Avail. Mem[%f]" % (float(req_mem)/(2**30), float(cuda.mem_get_info()[0])/2**30) )
 
     if req_mem > cuda.mem_get_info()[0]*.95: #if we can split without error, lets
         logging.info("Splitting data from calculation")
-        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,  rms_only)
+        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
 
     try:
         exp.toGPU( sample_block_size )
@@ -44,7 +43,7 @@ def runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block
         for d in [exp,rms, nm, rt, sm, srt, gm]:
             if d.gpu_data is not None:
                 d.gpu_data.free()
-        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only)
+        return splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only )
 
     dirac.sampleRankTemplate( exp.gpu_data, gm.gpu_data, srt.gpu_data, exp.buffer_nsamples, gm.buffer_npairs, npairs_block_size, sample_block_size)
     
@@ -64,7 +63,7 @@ def reqMemory(exp, rms,np,rt,sm,srt,gm,nm,sample_block_size, nets_block_size, np
     pred += gm.gpu_mem( npairs_block_size )
     return pred
 
-def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size,  rms_only=False):
+def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, rms_only=False ):
     gm =  data.GeneMap( gene_map )
     nm = data.NetworkMap( network_map )
     part_point,nm1,nm2 = nm.split()
@@ -105,6 +104,7 @@ def splitDirac( expression_matrix, gene_map, sample_map, network_map, sample_blo
             d.buffer_data = None
             d.gpu_data = None
 
+    logging.info("Joining Splits")
     if rms_only:
         srt = None
         rt = None
@@ -173,16 +173,16 @@ if __name__ == "__main__":
     import pycuda.driver as cuda
     import time
     import scipy.misc
-    test = False 
+    test = True
     cuda.init()
     dev = cuda.Device(0)
     ctx = dev.make_context()
-    for _ in range(100):
+    for _ in range(1):
 
-        n = random.randint(500,2000)
+        n = random.randint(500,600)
         gn = 10000
         neighbors = random.randint(5, 20) 
-        nnets = random.randint(50,300)
+        nnets = random.randint(50,100)
 
         samples = map(lambda x:'s%i'%x, range(n))
         genes = map(lambda x:'g%i'%x, range(gn))
@@ -197,7 +197,7 @@ if __name__ == "__main__":
         net_map = [0]
        
         for i in range(nnets):
-            n_size = random.randint(5,300)
+            n_size = random.randint(5,30)
 
             net_map.append(net_map[-1] + scipy.misc.comb(n_size,2, exact=1))
             net = random.sample(genes,n_size)
@@ -230,6 +230,7 @@ if __name__ == "__main__":
         for i in range(num_rep):
             st = time.time()
             srt,rt,rms = runDirac( expression_matrix, gene_map, sample_map, network_map, sample_block_size, npairs_block_size, nets_block_size, True )
+            rms.fromGPU()
             acc += time.time() - st
 
         print "running time(avg):", acc/num_rep
@@ -255,11 +256,14 @@ if __name__ == "__main__":
                 ap = False
             """
             print "RMS check:",
-            if  np.allclose(rms.res_data, test_rms,  atol=1e-02):
-                print "PASSED"
-            else: 
-                print  "FAILED"
-                ap = False
+            try:
+                if  np.allclose(rms.res_data, test_rms,  atol=1e-02):
+                    print "PASSED"
+                else: 
+                    print  "FAILED"
+                    ap = False
+            except:
+                print rms.res_data
             
             if not ap:
                 print "saving tables"
