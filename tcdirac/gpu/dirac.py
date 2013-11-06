@@ -1,4 +1,4 @@
-debug = True
+debug = False 
 import kernels
 from pycuda.compiler import SourceModule
 import pycuda.driver as cuda
