@@ -464,13 +464,8 @@ class SharedRankMatchingScores(RankMatchingScores):
         buff = np.frombuffer(shared_mem.get_obj(), dtype=buff_dtype)
         buff = buff[:self.buffer_nnets*self.buffer_nsamples]
         buff = buff.reshape( (self.buffer_nnets, self.buffer_nsamples) )
-        """
-        self.res_data = np.zeros(( self.buffer_nnets, self.buffer_nsamples), dtype = buff_dtype)
-        cuda.memcpy_dtoh(self.res_data, self.gpu_data )
-        """
         cuda.memcpy_dtoh(buff, self.gpu_data)
         return buff
-        #print "All close", np.allclose( buff, self.res_data)
 
     def gpu_mem(self, samples_block_size, nets_block_size, dtype=np.float32):
         return self.buffer_nnets*self.buffer_nsamples*dtype(1).nbytes
