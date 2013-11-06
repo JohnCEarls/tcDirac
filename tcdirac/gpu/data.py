@@ -267,8 +267,8 @@ class SharedSampleMap(SampleMap):
         self.orig_kneighbors = None
         self.orig_data = None
 
-        self.buffer_kneighbors =  orig_smap.shape[0]
-        self.buffer_nsamples =  orig_smap.shape[1]
+        self.buffer_nsamples =  orig_smap.shape[0]
+        self.buffer_kneighbors =  orig_smap.shape[1]
         self.buffer_data =  orig_smap
     
         self.gpu_data = None

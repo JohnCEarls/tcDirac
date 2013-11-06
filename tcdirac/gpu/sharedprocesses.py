@@ -9,7 +9,10 @@ def runSharedDirac( exp, gm, sm, nm, sample_block_size, npairs_block_size, nets_
 
     srt = data.SharedSampleRankTemplate( exp.buffer_nsamples, gm.buffer_npairs )
     rt = data.SharedRankTemplate( exp.buffer_nsamples, gm.buffer_npairs )
-    rms = data.SharedRankMatchingScores( nm.orig_nnets, exp.buffer_nsamples )
+    #rms = data.RankMatchingScores( nm.orig_nnets, exp.orig_nsamples )
+
+    
+    rms = data.SharedRankMatchingScores( nm.buffer_nnets, exp.buffer_nsamples )
 
     try:
         exp.toGPU( sample_block_size )
