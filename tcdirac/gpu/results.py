@@ -32,6 +32,92 @@ import pycuda.driver as cuda
 
 import tcdirac.dtypes as dtypes
 from tcdirac.gpu import processes
+from loader import MaxDepth 
+
+class PackerQueue:
+    """
+    Object containing a list of PackerBosses for the gpu to write to
+    """
+    def __init__(self, results_q, out_dir, data_settings):
+        self.results_q = results_q #queue containing meta information
+        self.out_dir = out_dir
+        self.data_settings = data_settings
+        self._bosses = []   
+        self._bosses_skip = []
+        self._curr = -1
+
+    def add_packer_boss(self, num=1):
+        if num <= 0:
+            return
+        else:
+            self._bosses.append( PackerBoss( 'pb_' + str(len(self._bosses)), self.results_q,self.out_dir, self.data_settings) )
+            self._bosses_skip.append(0)
+            self._bosses[-1].start()
+            #self._bosses[-1].set_add_data()
+            self.add_packer_boss( num - 1)
+
+    def next_packer_boss(self, time_out=0.1, max_depth=None):
+        if len(self._bosses) == 0:
+            raise Exception("No Loaders")
+        if max_depth is None:
+            max_depth = 2*len(self._bosses)#default max_depth to 2 passes of the queue
+        if max_depth <= 0:
+            raise MaxDepth("Max Depth exceeded")
+
+        self._curr = (self._curr + 1)%len(self._bosses)
+        if self._bosses[self._curr].ready():
+            self._bosses_skip[self._curr] = 0
+            print "md", max_depth
+            return self._bosses[self._curr]
+        else:
+            if self._bosses_skip[self._curr] > 0:
+                time.sleep(.1)
+            self._bosses_skip[self._curr] += 1
+            return self.next_packer_boss(time_out, max_depth=max_depth-1)
+
+    def checkSkip(self, max_skip=3):
+        over_limit = [i for i,l in enumerate(self._bosses_skip) if l > max_skip]
+        temp = []
+        for i in over_limit:
+            temp.append(self._bosses[i])
+            self._bosses[i].kill_all()
+        for i in over_limit:
+            self._bosses[i] =  LoaderBoss( 'lb_' + str(i), self.file_q, self.data_settings)
+            self._bosses_skip[i] = 0
+        for l in temp:
+            l.clean_up()
+
+    def remove_packer_boss(self):
+        if len(self._bosses) <=0:
+            raise Exception("Attempt to remove Loader from empty LoaderQueue")
+        temp = self._bosses[-1]
+        temp.kill_all()
+        self._bosses = self._bosses[:-1]
+        self._bosses_skip = self._bosses_skip[:-1]
+        self._curr = self._curr%len(self._bosses)
+        temp.clean_up()
+
+    def no_data(self):
+        return self.file_q.empty()
+
+    def kill_all(self):
+        for l in self._bosses:
+            l.kill()
+            print "%s you killed my father, prepared to die" % l.name
+        for l in self._bosses:
+            l.clean_up()
+
+        self._bosses = []
+        self._bosses_skip = []
+        self._curr = -1
+
+    def set_data_settings(self, data_settings):
+        self.data_settings = data_settings
+
+
+
+
+
 
 
 

@@ -33,7 +33,15 @@ import pycuda.driver as cuda
 import tcdirac.dtypes as dtypes
 from tcdirac.gpu import processes
 
-from results import PackerBoss
+#from results import PackerBoss
+
+
+class MaxDepth(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
+
 
 
 def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
@@ -84,12 +92,95 @@ def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
             else:
                 logging.error( "terminator: data out of order [%s]" % (','.join(temp_d.itervalues()),))
 
+
+
+class LoaderQueue:
+    """
+    Object containing a list of LoaderBosses for the gpu to pull from
+    """
+    def __init__(self, file_q, in_dir, data_settings):
+        self.file_q = file_q #queue containing datasources
+        self.in_dir = in_dir
+        self.data_settings = data_settings
+        self._bosses = []
+        self._bosses_skip = []
+        self._curr = -1
+
+    def add_loader_boss(self, num=1):
+        if num <= 0:
+            return
+        else:
+            self._bosses.append( LoaderBoss( 'lb_' + str(len(self._bosses)), self.file_q,self.in_dir, self.data_settings) )
+            self._bosses_skip.append(0)
+            self._bosses[-1].start()
+            self._bosses[-1].set_add_data()
+            self.add_loader_boss( num - 1)
+
+    def next_loader_boss(self, time_out=0.1, max_depth=None):
+        if len(self._bosses) == 0:
+            raise Exception("No Loaders")
+        if max_depth is None:
+            max_depth = 2*len(self._bosses)#default max_depth to 2 passes of the queue
+        if max_depth <= 0:
+            raise MaxDepth("Max Depth exceeded")            
+
+        self._curr = (self._curr + 1)%len(self._bosses)
+        if self._bosses[self._curr].wait_data_ready(time_out=time_out):
+            self._bosses_skip[self._curr] = 0
+            print "md", max_depth
+            return self._bosses[self._curr]
+        else:
+            self._bosses_skip[self._curr] += 1
+            return self.next_loader_boss(time_out, max_depth=max_depth-1)
+
+    def checkSkip(self, max_skip=3):
+        over_limit = [i for i,l in enumerate(self._bosses_skip) if l > max_skip]
+        temp = []
+        for i in over_limit:
+            temp.append(self._bosses[i])
+            self._bosses[i].kill_all()
+        for i in over_limit:
+            self._bosses[i] =  LoaderBoss( 'lb_' + str(i), self.file_q, self.data_settings) 
+            self._bosses_skip[i] = 0
+        for l in temp:
+            l.clean_up()
+
+    def remove_loader_boss(self):
+        if len(self._bosses) <=0:
+            raise Exception("Attempt to remove Loader from empty LoaderQueue")
+        temp = self._bosses[-1]
+        temp.kill_all()
+        self._bosses = self._bosses[:-1]
+        self._bosses_skip = self._bosses_skip[:-1]
+        self._curr = self._curr%len(self._bosses)
+        temp.clean_up()
+
+    def no_data(self):
+        return self.file_q.empty()
+
+    def kill_all(self):
+        for l in self._bosses:
+            l.kill_all()
+            print "%s you killed my father, prepared to die" % l.base_name
+        for l in self._bosses:
+            l.clean_up()
+          
+        self._bosses = []
+        self._bosses_skip = []
+        self._curr = -1 
+    
+    def set_data_settings(self, data_settings):
+        self.data_settings = data_settings
+
+    
+
+
 class LoaderBoss:
     """
     Object for initializing and interacting with the data loading modules
     base_name - a name for this set of loaders
     file_q - a queue for passing file names to the loaders.
-    indir - the directory holding the data to be loaded
+    in_dir - the directory holding the data to be loaded
     data_settings - a list of tuples of the form (name, buffer size, data type)
         for example, [('exp', 200*20000, np.float32), ('sm',5*200, np.uint32),...]
         the names expected should be 
@@ -98,10 +189,10 @@ class LoaderBoss:
             'sm' - sample map,
             'nm' - network map
     """
-    def __init__(self, base_name, file_q,indir,data_settings):
+    def __init__(self, base_name, file_q,in_dir,data_settings):
         self.file_q = file_q
         self.id_q = Queue()
-        self.indir = indir
+        self.in_dir = in_dir
         self.base_name = base_name
         self.data_settings = data_settings
         self.loaders = self._create_loaders('_'.join(['proc',base_name]), data_settings)
@@ -232,7 +323,7 @@ class LoaderBoss:
         smem = self._create_shared(dsize, dtype)
         evts = self._create_events()
         file_q = Queue()
-        l = Loader(file_q, evts, smem, self.indir, name)
+        l = Loader(file_q, evts, smem, self.in_dir, name)
         ls = LoaderStruct(name,smem,evts,file_q, process=l)
         return ls
 
@@ -303,6 +394,7 @@ class LoaderStruct:
         Note: when done with the data, you must call release_data()
             a lock on the shared memory is acquired
         """
+        print "ls.get_data: %s" % self.name
         shared_mem = self.shared_mem
         for m in shared_mem.itervalues():
             l = m.get_lock()
@@ -350,7 +442,7 @@ class LoaderDist(Process):
         logging.debug("%s: starting..."% self.name)
         while not self.evt_death.is_set():
             try:
-                if self.proto_q.qsize() < 10 + random.randint(2,10):
+                if self.proto_q.qsize() < 2 + random.randint(2,10):
                     f_dict = self.in_q.get(True, 2)
                     logging.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
                     self.out_q.put(f_dict)
@@ -367,7 +459,7 @@ class LoaderDist(Process):
         
     
 class Loader(Process):
-    def __init__(self, inst_q, events, shared_mem, indir, name, add_data_timeout=10, inst_q_timeout=3):
+    def __init__(self, inst_q, events, shared_mem, in_dir, name, add_data_timeout=10, inst_q_timeout=3):
         """
             inst_q = mp queue that tells process next file name
             events = dict of mp events
@@ -378,7 +470,7 @@ class Loader(Process):
                 shared_mem['data'] = shared memory for numpy array buffer
                 shared_mem['shape'] = shared memory for np array shape
                 shared_mem['dtype'] = shared memory for np array dtype
-            indir = string encoding location where incoming np data is being written and should be read from
+            in_dir = string encoding location where incoming np data is being written and should be read from
             name = process name(up to you to make it unique)
             add_data_timeout = time in seconds before you check for death when waiting for gpu to release memory
             inst_q_timeout = time in seconds before you check for death when waiting for new filename
@@ -392,7 +484,7 @@ class Loader(Process):
         self.evt_add_data = events['add_data']
         self.evt_data_ready = events['data_ready']
         self.evt_die = events['die']
-        self.indir = indir
+        self.in_dir = in_dir
         self._ad_timeout = add_data_timeout
         self._iq_timeout = inst_q_timeout
 
@@ -424,7 +516,7 @@ class Loader(Process):
 
 
     def _get_data(self, fname):
-        return np.load(os.path.join(self.indir, fname))
+        return np.load(os.path.join(self.in_dir, fname))
 
     def run(self):  
         logging.info("%s: Starting " % (self.name,)) 
