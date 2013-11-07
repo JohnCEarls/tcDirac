@@ -37,7 +37,7 @@ import sharedprocesses
 import data
 
 def testAccuracy(pid=0):
-    bdir = '/scratch/sgeadmin/'
+    in_dir = '/scratch/sgeadmin/'
     odir = '/scratch/sgeadmin/'
     np_list = []
     sample_block_size = 32
@@ -62,6 +62,7 @@ def testAccuracy(pid=0):
 
     check_list = []
     cuda.init()
+    unique_fid = set()
     dev = cuda.Device(0)
     ctx = dev.make_context()
     for i in range(10):
@@ -69,7 +70,11 @@ def testAccuracy(pid=0):
         p_hash = None
         for i in range(2):
             f_dict = {}
-            f_dict['file_id'] = str(random.randint(1000,10000))
+            f_id = str(random.randint(10000,100000))
+            while f_id in unique_fid:
+                f_id = str(random.randint(10000,100000))
+            f_dict['file_id'] = f_id
+            unique_fid.add(f_id)
 
             for k,v in fake.iteritems():
                 if k == 'em':
@@ -100,7 +105,7 @@ def testAccuracy(pid=0):
                         p_hash = None
                         p_temp = None
                 f_name = '_'.join([ k, f_dict['file_id'], f_hash])
-                with open(os.path.join( bdir, f_name),'wb') as f:
+                with open(os.path.join( in_dir, f_name),'wb') as f:
                     np.save(f, v)
                 if v.size > dsize[k]:
                     dsize[k] = v.size
@@ -109,12 +114,12 @@ def testAccuracy(pid=0):
             """
             uncomment to compare srt and rts
             srt.fromGPU()
-            np.save(os.path.join(bdir, 'srt_'+ f_dict['file_id'] + '_single'), srt.res_data)
+            np.save(os.path.join(in_dir, 'srt_'+ f_dict['file_id'] + '_single'), srt.res_data)
             rt.fromGPU()
-            np.save(os.path.join(bdir, 'rt_'+ f_dict['file_id'] + '_single' ), rt.res_data)
+            np.save(os.path.join(in_dir, 'rt_'+ f_dict['file_id'] + '_single' ), rt.res_data)
             """
             rms.fromGPU(res_dtype=np.float32)
-            np.save(os.path.join(bdir, 'rms_'+ f_dict['file_id'] + '_single'), rms.res_data)
+            np.save(os.path.join(in_dir, 'rms_'+ f_dict['file_id'] + '_single'), rms.res_data)
 
             rms = data.RankMatchingScores( nm.buffer_nnets, sm.buffer_nsamples )
             
@@ -128,7 +133,7 @@ def testAccuracy(pid=0):
         if k in ['em','sm','gm','nm']:
             data_settings.append((k, b, dtype[k]))
     print "Data Created"
-    db = LoaderBoss(str(pid),inst_q,bdir,data_settings)
+    db = LoaderBoss(str(pid),inst_q,in_dir,data_settings)
     pb = PackerBoss(str(pid), results_q, odir, (dsize['rms'], dtype['rms']) )
     db.start()
     pb.start()
@@ -158,9 +163,9 @@ def testAccuracy(pid=0):
             """
             uncomment to test srt and rt
             srt.fromGPU()
-            np.save(os.path.join(bdir, 'srt_hacky_'+my_f['file_id']), srt.buffer_data)
+            np.save(os.path.join(in_dir, 'srt_hacky_'+my_f['file_id']), srt.buffer_data)
             rt.fromGPU()
-            np.save(os.path.join(bdir, 'rt_hacky_'+my_f['file_id']), rt.buffer_data)
+            np.save(os.path.join(in_dir, 'rt_hacky_'+my_f['file_id']), rt.buffer_data)
             """
             db.release_loader_data()
             db.set_add_data()
@@ -183,10 +188,10 @@ def testAccuracy(pid=0):
     all_match = True
     while not results_q.empty():
         my_dict = results_q.get()
-        proc = np.load(os.path.join(bdir, my_dict['f_name']))
-        single = np.load(os.path.join(bdir, 'rms_'+ my_dict['file_id'] + '_single.npy'))
+        proc = np.load(os.path.join(in_dir, my_dict['f_name']))
+        single = np.load(os.path.join(in_dir, 'rms_'+ my_dict['file_id'] + '_single.npy'))
         (a,b) = single.shape
-        print "Comparing", os.path.join(bdir, my_dict['f_name']), " and ", os.path.join(bdir, 'rms_'+ my_dict['file_id'] + '_single.npy')
+        print "Comparing", os.path.join(in_dir, my_dict['f_name']), " and ", os.path.join(in_dir, 'rms_'+ my_dict['file_id'] + '_single.npy')
         match = np.allclose(proc[:a,:b], single)
         print "Matching",my_dict['file_id'], match
         if not match:
@@ -201,8 +206,8 @@ def testAccuracy(pid=0):
 
 
 def testMulti(pid=0):
-    bdir = '/scratch/sgeadmin/'
-    odir = '/scratch/sgeadmin/'
+    in_dir = '/scratch/sgeadmin/'
+    odir = '/scratch/sgeadmin/out'
     np_list = []
     sample_block_size = 32
     npairs_block_size = 16
@@ -211,6 +216,8 @@ def testMulti(pid=0):
     inst_q = Queue()
     results_q = Queue()
     check_cp = False #check whether in == out, if False, comparing speed
+    check_list = []
+    unique_fid = set()
     """
             events = dict of mp events
                 events['add_data'] mp event, true means add data 
@@ -224,75 +231,18 @@ def testMulti(pid=0):
     dsize = {'em':0, 'gm':0, 'sm':0, 'nm':0, 'rms':0}
     dtype = {'em':np.float32, 'gm':np.int32, 'sm':np.int32,'nm':np.int32,'rms':np.float32 }
 
-    check_list = []
     cuda.init()
     dev = cuda.Device(0)
     ctx = dev.make_context()
-    for i in range(100):
-        fake = genFakeData( 200, 20000)
-        p_hash = None
-        for i in range(1):
-            f_dict = {}
-            f_dict['file_id'] = str(random.randint(1000,10000))
 
-            for k,v in fake.iteritems():
-                if k == 'em':
-                    exp = data.Expression(v)
-                    exp.createBuffer(sample_block_size, buff_dtype=np.float32)
-                    v = exp.buffer_data
-                    t_nsamp = exp.orig_nsamples
-                elif k == 'sm':
-                    sm = data.SampleMap(v)
-                    sm.createBuffer(sample_block_size, buff_dtype=np.int32)
-                    v = sm.buffer_data
-                elif k == 'gm':
-                    gm = data.GeneMap(v) 
-                    gm.createBuffer( npairs_block_size, buff_dtype=np.int32)
-                    v = gm.buffer_data
-                elif k == 'nm':
-                    nm = data.NetworkMap(v)
-                    nm.createBuffer( nets_block_size, buff_dtype=np.int32 )
-                    v = nm.buffer_data
-                f_hash = hashlib.sha1(v).hexdigest()
-                if k == 'em':
-                    if p_hash is None:
-                        p_hash = f_hash
-                        p_temp = v.copy()
-                    else:
-                        assert p_hash == f_hash, str(v) + " " + str(p_temp)
-                        p_hash = None
-                        p_temp = None
-                f_name = '_'.join([ k, f_dict['file_id'], f_hash])
-                with open(os.path.join( bdir, f_name),'wb') as f:
-                    np.save(f, v)
-                if v.size > dsize[k]:
-                    dsize[k] = v.size
-                f_dict[k] = f_name
-            srt,rt,rms = processes.runDirac(exp.orig_data, gm.orig_data, sm.orig_data,nm.orig_data, sample_block_size, npairs_block_size, nets_block_size, True)
-            """
-            uncomment to compare srt and rts
-            srt.fromGPU()
-            np.save(os.path.join(bdir, 'srt_'+ f_dict['file_id'] + '_single'), srt.res_data)
-            rt.fromGPU()
-            np.save(os.path.join(bdir, 'rt_'+ f_dict['file_id'] + '_single' ), rt.res_data)
-            """
-            rms.fromGPU(res_dtype=np.float32)
-            np.save(os.path.join(bdir, 'rms_'+ f_dict['file_id'] + '_single'), rms.res_data)
-
-            rms = data.RankMatchingScores( nm.buffer_nnets, sm.buffer_nsamples )
-            
-            rms.createBuffer(  sample_block_size, nets_block_size, buff_dtype=np.float32)
-            if rms.buffer_data.size > dsize['rms']:
-               dsize['rms'] = rms.buffer_data.size 
-            inst_q.put( f_dict )
-            check_list.append(f_dict)
+    dsize, check_list = addFakeDataQueue(unique_fid, in_dir, inst_q, check_list,dsize, sample_block_size, npairs_block_size, nets_block_size)
     data_settings = []
     for k,b in dsize.iteritems():
         if k in ['em','sm','gm','nm']:
             data_settings.append((k, b, dtype[k]))
     print "Data Created"
-    #db = LoaderBoss(str(pid),inst_q,bdir,data_settings)
-    db_q = LoaderQueue( inst_q, bdir, data_settings)
+    #db = LoaderBoss(str(pid),inst_q,in_dir,data_settings)
+    db_q = LoaderQueue( inst_q, in_dir, data_settings)
     pb_q = PackerQueue( results_q, odir, (dsize['rms'], dtype['rms']) )
     db_q.add_loader_boss(10)
     pb_q.add_packer_boss(10)
@@ -327,7 +277,6 @@ def testMulti(pid=0):
             sample_map = db.get_sample_map()
             network_map = db.get_network_map()
             exp = data.SharedExpression( expression_matrix )
-            exp.orig_nsamples = t_nsamp
             gm = data.SharedGeneMap( gene_map )
             sm = data.SharedSampleMap( sample_map )
             nm = data.SharedNetworkMap( network_map )
@@ -336,9 +285,9 @@ def testMulti(pid=0):
             """
             uncomment to test srt and rt
             srt.fromGPU()
-            np.save(os.path.join(bdir, 'srt_hacky_'+my_f['file_id']), srt.buffer_data)
+            np.save(os.path.join(in_dir, 'srt_hacky_'+my_f['file_id']), srt.buffer_data)
             rt.fromGPU()
-            np.save(os.path.join(bdir, 'rt_hacky_'+my_f['file_id']), rt.buffer_data)
+            np.save(os.path.join(in_dir, 'rt_hacky_'+my_f['file_id']), rt.buffer_data)
             """
             db.release_loader_data()
             db.set_add_data()
@@ -356,10 +305,10 @@ def testMulti(pid=0):
     while not results_q.empty():
         try:
             my_dict = results_q.get()
-            proc = np.load(os.path.join(bdir, my_dict['f_name']))
-            single = np.load(os.path.join(bdir, 'rms_'+ my_dict['file_id'] + '_single.npy'))
+            proc = np.load(os.path.join(odir, my_dict['f_name']))
+            single = np.load(os.path.join(in_dir, 'rms_'+ my_dict['file_id'] + '_single.npy'))
             (a,b) = single.shape
-            print "Comparing", os.path.join(bdir, my_dict['f_name']), " and ", os.path.join(bdir, 'rms_'+ my_dict['file_id'] + '_single.npy')
+            print "Comparing", os.path.join(odir, my_dict['f_name']), " and ", os.path.join(in_dir, 'rms_'+ my_dict['file_id'] + '_single.npy')
             match = np.allclose(proc[:a,:b], single)
             print "Matching",my_dict['file_id'], match
             if not match:
@@ -376,6 +325,73 @@ def testMulti(pid=0):
 
     logging.info( "Tester: exitted gracefully")
     ctx.pop()
+
+
+def addFakeDataQueue(unique_fid, in_dir,inst_q, check_list,dsize, sample_block_size, npairs_block_size, nets_block_size):
+    
+    for i in range(100):
+        fake = genFakeData( 200, 20000)
+        p_hash = None
+        for i in range(1):
+            f_dict = {}
+            f_id = str(random.randint(10000,100000))
+            while f_id in unique_fid:
+                f_id = str(random.randint(10000,100000))
+            f_dict['file_id'] = f_id
+            unique_fid.add(f_id)
+
+            for k,v in fake.iteritems():
+                if k == 'em':
+                    exp = data.Expression(v)
+                    exp.createBuffer(sample_block_size, buff_dtype=np.float32)
+                    v = exp.buffer_data
+                    t_nsamp = exp.orig_nsamples
+                elif k == 'sm':
+                    sm = data.SampleMap(v)
+                    sm.createBuffer(sample_block_size, buff_dtype=np.int32)
+                    v = sm.buffer_data
+                elif k == 'gm':
+                    gm = data.GeneMap(v) 
+                    gm.createBuffer( npairs_block_size, buff_dtype=np.int32)
+                    v = gm.buffer_data
+                elif k == 'nm':
+                    nm = data.NetworkMap(v)
+                    nm.createBuffer( nets_block_size, buff_dtype=np.int32 )
+                    v = nm.buffer_data
+                f_hash = hashlib.sha1(v).hexdigest()
+                if k == 'em':
+                    if p_hash is None:
+                        p_hash = f_hash
+                        p_temp = v.copy()
+                    else:
+                        assert p_hash == f_hash, str(v) + " " + str(p_temp)
+                        p_hash = None
+                        p_temp = None
+                f_name = '_'.join([ k, f_dict['file_id'], f_hash])
+                with open(os.path.join( in_dir, f_name),'wb') as f:
+                    np.save(f, v)
+                if v.size > dsize[k]:
+                    dsize[k] = v.size
+                f_dict[k] = f_name
+            srt,rt,rms = processes.runDirac(exp.orig_data, gm.orig_data, sm.orig_data,nm.orig_data, sample_block_size, npairs_block_size, nets_block_size, True)
+            """
+            uncomment to compare srt and rts
+            srt.fromGPU()
+            np.save(os.path.join(in_dir, 'srt_'+ f_dict['file_id'] + '_single'), srt.res_data)
+            rt.fromGPU()
+            np.save(os.path.join(in_dir, 'rt_'+ f_dict['file_id'] + '_single' ), rt.res_data)
+            """
+            rms.fromGPU(res_dtype=np.float32)
+            np.save(os.path.join(in_dir, 'rms_'+ f_dict['file_id'] + '_single'), rms.res_data)
+
+            rms = data.RankMatchingScores( nm.buffer_nnets, sm.buffer_nsamples )
+            
+            rms.createBuffer(  sample_block_size, nets_block_size, buff_dtype=np.float32)
+            if rms.buffer_data.size > dsize['rms']:
+               dsize['rms'] = rms.buffer_data.size 
+            inst_q.put( f_dict )
+            check_list.append(f_dict)
+    return dsize, check_list
 
 
 def genFakeData( n, gn):
