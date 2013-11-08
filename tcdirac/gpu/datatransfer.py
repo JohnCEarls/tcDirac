@@ -19,6 +19,8 @@ import os.path
 import tcdirac
 import logging
 import time
+import json
+import random
 class Retriever(Process):
     def __init__(self, name, in_dir,  q_ret2gpu, evt_death, sqs_name, s3bucket_name, max_q_size):
         Process.__init__(self, name=name)
@@ -31,15 +33,13 @@ class Retriever(Process):
         self.evt_death = evt_death
         self.max_q_size = max_q_size
         
-
     def run(self):
         while not self.evt_death.is_set():
             if self.q_ret2gpu.qsize() < self.max_q_size:
                 messages = self.run_once()
             if messages < 10 and not self.evt_death.is_set():
-                logging.debug("%s: zzzzzzz" % self.name )
+                logging.info("%s: zzzzzzz" % self.name )
                 time.sleep(random.randint(1,10))
-
 
     def run_once(self):
         messages = self._sqs_q.get_messages(10)
@@ -49,22 +49,23 @@ class Retriever(Process):
                 m = json.loads(message.get_body())
                 for f in m['f_names']:
                     self.download_file( f )
+                    print "downloaded", f
                 cont = True
                 while cont:
                     try:
                         self.q_ret2gpu.put( m, timeout=10 )
                         cont = False
                     except Full:
-                        logging.debug("%s: queue_full" % self.name )
+                        logging.info("%s: queue_full" % self.name )
+
                         if self.evt_death.is_set():
                             return m_count
-                self._sqs_q.delete(m)
+                self._sqs_q.delete_message(message)
                 m_count += 1
             except:
                 logging.exception("%s: while trying to download files" % self.name)                
         return m_count
             
-
     def _connect_s3(self):
         conn = boto.connect_s3()        
         b = conn.get_bucket( self.s3bucket_name )
@@ -97,10 +98,22 @@ class RetrieverQueue:
         else:
             evt_death = Event()
             evt_death.clear()
-            self._retrievers.append( Retriever(self.name + "_r" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*num))
+            self._retrievers.append( Retriever(self.name + "_r" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*(num+1)))
             self._reaper.append(evt_death)
+            self._retrievers[-1].daemon = True
             self._retrievers[-1].start()
             self.add_retriever(num - 1)
+
+
+    def repair(self):
+        for i, d in enumerate(self._reaper):
+            if d.is_set():
+                p = self._retrievers[i]
+                if p.is_alive():
+                    p.terminate()
+                p.join(.5)    
+            d.clear()
+            self._retrievers[i] =  Retriever(self.name + "_p" + str(i)+"_repaired", self.in_dir,  self.q_ret2gpu, d, self.sqs_name, self.s3bucket_name, max_q_size=10*i)
 
     def kill_all(self):
         for r in self._reaper:
@@ -133,15 +146,15 @@ class Poster(Process):
         try:
             f_info = self.q_gpu2s3.get(True, 3)
             self.upload_file( f_info['f_name'] )
-            m = Message( json.dumps(f_info) )
-            self._sqs_q.put( m )
+            m = Message(body= json.dumps(f_info) )
+            self._sqs_q.write( m )
         except Empty:
             if self.evt_death.is_set():
                 logging.info("%s: exiting..."%self.name)
                 return
-            
-            
-            
+        except:
+            logging.exception("%s: exception in run_once" % self.name)
+            self.evt_death.set()
 
     def _connect_s3(self):
         conn = boto.connect_s3()        
@@ -157,7 +170,7 @@ class Poster(Process):
         k = Key(self._s3_bucket)
         k.key = file_name
         k.set_contents_from_filename( os.path.join(self.out_dir, file_name), reduced_redundancy=True )
-
+        logging.debug("%s: deleting <%s>" % (self.name,  os.path.join(self.out_dir, file_name)))
         os.remove(os.path.join(self.out_dir, file_name))
 
 
@@ -179,8 +192,27 @@ class PosterQueue:
             evt_death.clear()
             self._posters.append( Poster(self.name + "_p" + str(num), self.out_dir,  self.q_gpu2s3, evt_death, self.sqs_name, self.s3bucket_name))
             self._reaper.append(evt_death)
+            self._posters[-1].daemon = True
             self._posters[-1].start()
             self.add_poster(num - 1)
+
+
+    def repair(self):
+        for i, d in enumerate(self._reaper):
+            if d.is_set():
+                p = self._posters[i]
+                if p.is_alive():
+                    p.terminate()
+                p.join(.5)    
+            d.clear()
+            self._posters[i] =  Poster(self.name + "_p" + str(i)+"_repaired", self.out_dir,  self.q_gpu2s3, d, self.sqs_name, self.s3bucket_name)
+            
+
+    def _sp_alive(self):
+        for d in self._reaper:
+            if d.is_set():
+                return False
+        return False
 
     def kill_all(self):
         logging.info("%s: sending death signals"%self.name)
@@ -191,6 +223,7 @@ class PosterQueue:
     def clean_up(self):
         for r in self._posters:
             if r.is_alive():
+                time.sleep(2)
                 r.terminate()
         for r in self._posters:
             r.join()
@@ -218,26 +251,64 @@ if __name__ == "__main__":
         except:pass
                
     ctr = 0
-    for i in my_files.iteritems():
+    for i in my_files.itervalues():
         print i
         ctr += 1
         if ctr > 10:
             break
 
-    pq_sqs = 'tcdirac-test00'
-    bucket = 'tcdirac-togpu-00'
+    pq_sqs = 'tcdirac-fromgpu-00'
+    rq_sqs = 'tcdirac-togpu-00'    
+    pq_bucket = 'tcdirac-togpu-00'
+    rq_bucket = 'tcdirac-togpu-00'
 
     q_gpu2s3 = Queue()
     out_dir = s_dir
     name="PQ"
+    pq = PosterQueue(  name, out_dir,  q_gpu2s3, pq_sqs, pq_bucket)
+    pq.add_poster(10)
+    for i in my_files.itervalues():
+        if len(i['f_names']) == 4:
+            for f_name in i['f_names']:
+                q_gpu2s3.put({'file_id':i['file_id'], 'f_name': f_name})
+            ctr += 1
+            conn = boto.connect_sqs()
+            q = conn.create_queue( rq_sqs  )
+            
+            print "shitpoker"
+            print json.dumps( i )
+            m = Message(body=json.dumps( i ))
+            print m.get_body()
+            q.write( m )
+            if ctr > 10:
+                break
 
-    pq = PosterQueue(  name, out_dir,  q_gpu2s3, pq_sqs, bucket)
-    pq.add_poster(5)
+    while not q_gpu2s3.empty(): 
+        time.sleep(1)
 
     time.sleep(10)
     pq.kill_all()
-    time.sleep(4)
+    time.sleep(2)
     pq.clean_up()
 
+    q_s32gpu = Queue()
+    name = "RQ"
 
+    rq = RetrieverQueue( name, out_dir,q_s32gpu ,rq_sqs, pq_bucket)
+    rq.add_retriever(10)
+
+    time.sleep(3)
+    
+    while q_s32gpu.qsize() < 100:
+        print "z"
+        time.sleep(1)
+    rq.kill_all()
+    time.sleep(2)
+
+    rq.clean_up()
+    while not q_s32gpu.empty():
+        print q_s32gpu.get()
+    
+    
+    
 
