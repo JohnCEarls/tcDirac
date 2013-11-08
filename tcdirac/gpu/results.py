@@ -45,6 +45,7 @@ class PackerQueue:
         self._bosses = []   
         self._bosses_skip = []
         self._curr = -1
+        self.check_out_dir()
 
     def add_packer_boss(self, num=1):
         if num <= 0:
@@ -53,7 +54,6 @@ class PackerQueue:
             self._bosses.append( PackerBoss( 'pb_' + str(len(self._bosses)), self.results_q,self.out_dir, self.data_settings) )
             self._bosses_skip.append(0)
             self._bosses[-1].start()
-            #self._bosses[-1].set_add_data()
             self.add_packer_boss( num - 1)
 
     def next_packer_boss(self, time_out=0.1, max_depth=None):
@@ -67,7 +67,6 @@ class PackerQueue:
         self._curr = (self._curr + 1)%len(self._bosses)
         if self._bosses[self._curr].ready():
             self._bosses_skip[self._curr] = 0
-            print "md", max_depth
             return self._bosses[self._curr]
         else:
             if self._bosses_skip[self._curr] > 0:
@@ -87,6 +86,11 @@ class PackerQueue:
         for l in temp:
             l.clean_up()
 
+    def check_out_dir(self):
+        if not os.path.exists(self.out_dir):
+            os.makedirs(self.out_dir)
+            logging.info("PackerQueue: dir did not exist, created %s" % (self.out_dir))
+
     def remove_packer_boss(self):
         if len(self._bosses) <=0:
             raise Exception("Attempt to remove Loader from empty LoaderQueue")
@@ -103,23 +107,15 @@ class PackerQueue:
     def kill_all(self):
         for l in self._bosses:
             l.kill()
-            print "%s you killed my father, prepared to die" % l.name
+            logging.debug( "%s you killed my father, prepared to die" % l.name)
         for l in self._bosses:
             l.clean_up()
-
         self._bosses = []
         self._bosses_skip = []
         self._curr = -1
 
     def set_data_settings(self, data_settings):
         self.data_settings = data_settings
-
-
-
-
-
-
-
 
 class Packer(Process):
     def __init__(self, name,p_type, in_q, out_q, smem,events, out_dir, dr_timeout=10):
