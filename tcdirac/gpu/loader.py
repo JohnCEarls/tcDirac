@@ -18,11 +18,6 @@ import cPickle
 from multiprocessing import Process, Queue, Lock, Value, Event, Array
 from Queue import Empty
 
-import boto
-from boto.s3.key import Key
-from boto.sqs.connection import SQSConnection
-from boto.sqs.message import Message
-
 import ctypes
 import numpy as np
 import scipy.misc
@@ -98,7 +93,8 @@ class LoaderQueue:
     """
     Object containing a list of LoaderBosses for the gpu to pull from
     """
-    def __init__(self, file_q, in_dir, data_settings):
+    def __init__(self,name, file_q, in_dir, data_settings):
+        self.name=name
         self.file_q = file_q #queue containing datasources
         self.in_dir = in_dir
         self.data_settings = data_settings
