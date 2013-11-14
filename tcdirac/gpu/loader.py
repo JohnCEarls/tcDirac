@@ -168,7 +168,14 @@ class LoaderQueue:
     def set_data_settings(self, data_settings):
         self.data_settings = data_settings
 
-    
+   
+    def num_sub(self):
+        count = 0
+        for r in self._bosses:
+            if r.is_alive():
+                count += 1
+        return count
+ 
 
 
 class LoaderBoss:
@@ -357,6 +364,13 @@ class LoaderBoss:
             self._terminator.terminate()
         self._terminator.join()
 
+    def is_alive(self):
+        for l in self.loaders.itervalues():
+            if not l.process.is_alive():
+                return False
+        return True
+        
+
     
 
 class LoaderStruct:
@@ -472,7 +486,7 @@ class Loader(Process):
             inst_q_timeout = time in seconds before you check for death when waiting for new filename
         """
         Process.__init__(self, name=name)
-        
+        self.daemon = True 
         self.instruction_queue = inst_q
         self.smem_data = shared_mem['data']
         self.smem_shape = shared_mem['shape']
