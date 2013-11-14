@@ -10,6 +10,7 @@ from Queue import Empty, Full
 
 import boto
 from boto.s3.key import Key
+import boto.sqs
 from boto.sqs.connection import SQSConnection
 from boto.sqs.message import Message
 
@@ -38,7 +39,7 @@ class Retriever(Process):
             if self.q_ret2gpu.qsize() < self.max_q_size:
                 messages = self.run_once()
             if messages < 10 and not self.evt_death.is_set():
-                logging.info("%s: zzzzzzz" % self.name )
+                logging.info("%s: starving <Retriever>" % self.name )
                 time.sleep(random.randint(1,10))
 
     def run_once(self):
@@ -72,7 +73,7 @@ class Retriever(Process):
         return b
 
     def _connect_sqs(self):
-        conn = boto.connect_sqs()
+        conn = boto.sqs.connect_to_region('us-east-1')
         q = conn.create_queue( self.sqs_name )
         return q
 
@@ -92,13 +93,14 @@ class RetrieverQueue:
         self._retrievers = []
         self._reaper = []
 
+
     def add_retriever(self, num=1):
         if num <= 0:
             return
         else:
             evt_death = Event()
             evt_death.clear()
-            self._retrievers.append( Retriever(self.name + "_r" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*(num+1)))
+            self._retrievers.append( Retriever(self.name + "_r" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*(num+1)  ) )
             self._reaper.append(evt_death)
             self._retrievers[-1].daemon = True
             self._retrievers[-1].start()
@@ -118,12 +120,30 @@ class RetrieverQueue:
     def kill_all(self):
         for r in self._reaper:
             r.set()
+
+    def all_dead(self):
+        for r in self._retrievers:
+            if r.is_alive():
+                return False
+        return True
+
     def clean_up(self):
         for r in self._retrievers:
             if r.is_alive():
                 r.terminate()
         for r in self._retrievers:
             r.join()
+        self._retrievers = []
+        self._reaper = []
+
+    def num_sub(self):
+        count = 0
+        for r in self._retrievers:
+            if r.is_alive():
+                count += 1
+        return count
+
+
 
 class Poster(Process):
     def __init__(self, name, out_dir,  q_gpu2s3, evt_death, sqs_name, s3bucket_name):
@@ -149,6 +169,7 @@ class Poster(Process):
             m = Message(body= json.dumps(f_info) )
             self._sqs_q.write( m )
         except Empty:
+            logging.info("%s: starving <Poster>" % self.name )
             if self.evt_death.is_set():
                 logging.info("%s: exiting..."%self.name)
                 return
@@ -162,7 +183,7 @@ class Poster(Process):
         return b
 
     def _connect_sqs(self):
-        conn = boto.connect_sqs()
+        conn = boto.sqs.connect_to_region('us-east-1')
         q = conn.create_queue( self.sqs_name )
         return q
 
@@ -227,8 +248,18 @@ class PosterQueue:
                 r.terminate()
         for r in self._posters:
             r.join()
+        self._posters = []
+        self._reaper = []
         logging.info("%s: complete..."%self.name)
 
+
+
+    def num_sub(self):
+        count = 0
+        for r in self._posters:
+            if r.is_alive():
+                count += 1
+        return count
 
 
 if __name__ == "__main__":

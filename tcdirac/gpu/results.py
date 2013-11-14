@@ -38,7 +38,8 @@ class PackerQueue:
     """
     Object containing a list of PackerBosses for the gpu to write to
     """
-    def __init__(self, results_q, out_dir, data_settings):
+    def __init__(self, name, results_q, out_dir, data_settings):
+        self.name = name
         self.results_q = results_q #queue containing meta information
         self.out_dir = out_dir
         self.data_settings = data_settings
@@ -117,6 +118,14 @@ class PackerQueue:
     def set_data_settings(self, data_settings):
         self.data_settings = data_settings
 
+    def num_sub(self):
+        count = 0
+        for p in self._bosses:
+            if p.is_alive():
+                count += 1
+        return count
+            
+
 class Packer(Process):
     def __init__(self, name,p_type, in_q, out_q, smem,events, out_dir, dr_timeout=10):
         Process.__init__(self, name=name)
@@ -127,6 +136,7 @@ class Packer(Process):
         self.out_dir = out_dir
         self._dr_timeout = dr_timeout
         self.p_type = p_type
+        self.daemon = True
 
 
     def run(self):
@@ -282,6 +292,10 @@ class PackerBoss:
             self.packer.process.terminate()
         self.packer.process.join()
         logging.debug("%s: This house is clean" %(self.name))
+
+    def is_alive(self):
+        return self.packer.process.is_alive()
+
 
 
 class PackerStruct:
