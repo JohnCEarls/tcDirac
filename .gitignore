@@ -1,0 +1,14 @@
+tcdirac/.nfs00000000000ca0cc00000002
+tcdirac/.nfs00000000000ca0e50000000a
+tcdirac/.nfs00000000000ca23000000001
+tcdirac/.nfs00000000000ca23100000001
+tcdirac/exp.csv
+tcdirac/exp.pkl
+tcdirac/gpu/temp.py
+tcdirac/mpi.hosts
+tcdirac/runTest.sh
+tcdirac/temp.py
+tcdirac/test.csv
+tcdirac/test.pkl
+tcdirac/test.py
+test.sh
