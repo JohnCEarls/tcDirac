@@ -121,6 +121,15 @@ _to_ctypes = {
   float64 :  ctypes.c_double, 
 }
 
+def to_index(dtype):
+    if dtype in nd_dict:
+        return nd_dict[dtype]
+    elif np.dtype(dtype) in nd_dict:
+        return nd_dict[np.dtype(dtype)]
+    else:
+        raise RuntimeError("%s not found" %dtype)
+
+
 def to_ctypes(dtype):
   """
   Give the ctypes representation for each numpy scalar type. 
