@@ -82,7 +82,7 @@ class PackerQueue:
             temp.append(self._bosses[i])
             self._bosses[i].kill_all()
         for i in over_limit:
-            self._bosses[i] =  LoaderBoss( 'lb_' + str(i), self.file_q, self.data_settings)
+            self._bosses[i] =  LoaderBoss( 'lb_' + str(i), self.results_q, self.data_settings)
             self._bosses_skip[i] = 0
         for l in temp:
             l.clean_up()
@@ -103,7 +103,7 @@ class PackerQueue:
         temp.clean_up()
 
     def no_data(self):
-        return self.file_q.empty()
+        return self.results_q.empty()
 
     def kill_all(self):
         for l in self._bosses:
@@ -223,9 +223,9 @@ class PackerBoss:
         self.out_q = out_q
         self.out_dir = out_dir
         self.data_settings = data_settings
-        b_size, dtype = data_settings
+        
         self.name = base_name
-        self.packer = self._create_packer( 'p_' + base_name, b_size, dtype )
+        self.packer = self._create_packer( 'p_' + base_name )
     
     def start(self):
         logging.debug("%s: starting packer.." %(self.name))
@@ -250,8 +250,11 @@ class PackerBoss:
         self.packer.release_mem()
         self.packer.events['data_ready'].set()
 
-    def _create_packer(self, name, dsize, dtype, p_type='rms'):
-        
+    def _create_packer(self, name,  p_type='rms'):
+        #only need dsize and dtype, but want to make consistent
+        #with data_settings for loader
+        for ds in self.data_settings:
+            rms, dsize, dtype = ds
         logging.debug("%s: creating packer.." %(self.name))
         sm = self._create_shared( dsize, dtype)
         ev = self._create_events()
