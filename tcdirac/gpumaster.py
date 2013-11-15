@@ -434,13 +434,22 @@ class Dirac:
         Creates directories listed in directories
         If they do not exist
         """
-        for k, p in self.directories.iteritems():
-            if not os.path.exists(p):
-                try:
-                    os.makedirs(p)
-                except:
-                    #might have multiple procs trying this, if already done, ignore
-                    pass
+        error = True
+        ctr = 0
+        while error:
+            error = False
+            ctr += 1
+            for k, p in self.directories.iteritems():
+                if not os.path.exists(p):
+                    try:
+                        os.makedirs(p)
+                    except:
+                        logging.error("%s: tried to make directory [%s], failed." %(self.name, p) )
+                        #might have multiple procs trying this, if already done, ignore
+                        error = True
+                        if ctr >= 10:
+                            logging.error("%s: failed to create directory too many times." % self.name)
+                            raise
 
 def mockMaster( master_q = 'tcdirac-master'):
     conn = boto.sqs.connect_to_region( 'us-east-1' )
@@ -458,6 +467,11 @@ def mockMaster( master_q = 'tcdirac-master'):
     m = Message(body=get_gpu_message())
 
     cq.write(m)
+
+    time.sleep(10)
+    print "Sending terminate signal"
+    cq.write( Message(body=get_terminate_message()))
+
 
 def get_gpu_message():
     parsed = {}
