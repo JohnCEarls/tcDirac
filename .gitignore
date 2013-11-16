@@ -12,3 +12,5 @@ tcdirac/test.csv
 tcdirac/test.pkl
 tcdirac/test.py
 test.sh
+.*.swp
+.*.swo
