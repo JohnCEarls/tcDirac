@@ -73,7 +73,7 @@ def sendLogSO():
     ch.setFormatter(formatter)
     root.addHandler(ch)
 """
-Below is from http://docs.python.org/2/howto/logging-cookbook.html#logging-cookbook
+Below is lightly modified from http://docs.python.org/2/howto/logging-cookbook.html#logging-cookbook
 """
 
 
