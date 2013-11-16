@@ -39,12 +39,13 @@ class MaxDepth(Exception):
 
 
 
-def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
+def kill_all(name, loaders, _ld_die_evt, loader_dist, file_q):
         """
         Kills all subprocesses
             called as subprocess by LoaderBoss in kill_all
         """
-        logging.debug("%s-terminator: Killing subprocesses"%(base_name))
+        logger = logging.getLogger(name)
+        logger.debug("terminator: Killing subprocesses")
         temp_l = None
         for l in loaders.itervalues():
             l.die()
@@ -61,7 +62,7 @@ def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
                 if l.events['die'].is_set():
                     dead = False
             if count >= 10:
-                logging.error("%s-terminator: Unable to clear queues")
+                logger.error("Terminator: Unable to clear queues")
                 return
         #put back unused data
         while not temp_l.q.empty():
@@ -82,10 +83,10 @@ def kill_all(base_name, loaders, _ld_die_evt, loader_dist, file_q):
             
             
             if not failed and len(t_check) == 4:
-                logging.debug( "terminator: recycling")
+                logger.debug( "terminator: recycling")
                 file_q.put( temp_d )
             else:
-                logging.error( "terminator: data out of order [%s]" % (','.join(temp_d.itervalues()),))
+                logger.error( "terminator: data out of order [%s]" % (','.join(temp_d.itervalues()),))
 
 
 
@@ -95,6 +96,9 @@ class LoaderQueue:
     """
     def __init__(self,name, file_q, in_dir, data_settings):
         self.name=name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.info("Initializing: dir<%s> data_settings<%s>" % (in_dir, str(data_settings)) )
         self.file_q = file_q #queue containing datasources
         self.in_dir = in_dir
         self.data_settings = data_settings
@@ -157,7 +161,7 @@ class LoaderQueue:
     def kill_all(self):
         for l in self._bosses:
             l.kill_all()
-            print "%s you killed my father, prepared to die" % l.base_name
+            print "%s you killed my father, prepared to die" % l.name
         for l in self._bosses:
             l.clean_up()
           
@@ -181,7 +185,7 @@ class LoaderQueue:
 class LoaderBoss:
     """
     Object for initializing and interacting with the data loading modules
-    base_name - a name for this set of loaders
+    name - a name for this set of loaders
     file_q - a queue for passing file names to the loaders.
     in_dir - the directory holding the data to be loaded
     data_settings - a list of tuples of the form (name, buffer size, data type)
@@ -192,15 +196,17 @@ class LoaderBoss:
             'sm' - sample map,
             'nm' - network map
     """
-    def __init__(self, base_name, file_q,in_dir,data_settings):
+    def __init__(self, name, file_q,in_dir,data_settings):
+        self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.file_q = file_q
         self.id_q = Queue()
         self.in_dir = in_dir
-        self.base_name = base_name
         self.data_settings = data_settings
-        self.loaders = self._create_loaders('_'.join(['proc',base_name]), data_settings)
+        self.loaders = self._create_loaders('_'.join(['proc',name]), data_settings)
         self.loader_dist = self._create_loader_dist()
-        self._terminator = Process( target=kill_all, args=(self.base_name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
+        self._terminator = Process( target=kill_all, args=(self.name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
 
     def get_file_id(self):
         """
@@ -242,12 +248,12 @@ class LoaderBoss:
         Returns true if no new data and all present data has been used
         """
         a_loader=self.loaders[self.data_settings[0][0]]
-        logging.debug("%s: Empty <fq:%s >"%(self.base_name, str(self.file_q.empty())))
+        self.logger.debug("Empty <fq:%s >"%( str(self.file_q.empty())))
         for k, a_loader in self.loaders.iteritems():
-            logging.debug("%s: empty loader <%s>" % (self.base_name, k))
-            logging.debug("%s: Empty <loader q:%s >"%(self.base_name, str(a_loader.q.empty())))
-            logging.debug("%s: Empty <ad:%s >"%(self.base_name, str(a_loader.events['add_data'].is_set())))
-            logging.debug("%s: Empty <not dr:%s >"%(self.base_name, str(not a_loader.events['data_ready'].is_set())))
+            self.logger.debug("empty loader <%s>" % ( k))
+            self.logger.debug("Empty <loader q:%s >"%( str(a_loader.q.empty())))
+            self.logger.debug("Empty <ad:%s >"%( str(a_loader.events['add_data'].is_set())))
+            self.logger.debug("Empty <not dr:%s >"%( str(not a_loader.events['data_ready'].is_set())))
         return self.file_q.empty() and a_loader.q.empty() and a_loader.events['add_data'].is_set() and not a_loader.events['data_ready'].is_set()
 
     def start(self):
@@ -314,12 +320,12 @@ class LoaderBoss:
 
     def _create_loader_dist(self):
         self._ld_die_evt = Event()
-        return LoaderDist( '_'.join([self.base_name,'ld']), self.file_q, self.id_q, self.loaders, self._ld_die_evt)
+        return LoaderDist( '_'.join([self.name,'ld']), self.file_q, self.id_q, self.loaders, self._ld_die_evt)
 
-    def _create_loaders(self, base_name, data_settings):
+    def _create_loaders(self, name, data_settings):
         loaders = {}
         for name, dsize, dtype in data_settings:
-            loaders[name] = self._create_loader( '_'.join([base_name,name]), dsize, dtype )
+            loaders[name] = self._create_loader( '_'.join([name,name]), dsize, dtype )
         return loaders
 
     def _create_loader(self,name, dsize, dtype):
@@ -347,19 +353,19 @@ class LoaderBoss:
         return events
 
     def clean_up(self):
-        logging.debug("%s: Cleaning up subprocesses"%(self.base_name))
+        self.logger.debug("Cleaning up subprocesses")
         temp_l = None
         for l in self.loaders.itervalues():
             if l.process.is_alive():
                 l.process.terminate()
             l.process.join()
             temp_l = l
-        logging.debug("%s: loaders joined"%(self.base_name))
+        self.logger.debug("loaders joined")
       
         if self.loader_dist.is_alive():
             self.loader_dist.terminate()
         self.loader_dist.join()
-        logging.debug("%s: loader_dist joined"%(self.base_name))
+        self.logger.debug("loader_dist joined")
         if self._terminator.is_alive():
             self._terminator.terminate()
         self._terminator.join()
@@ -369,9 +375,6 @@ class LoaderBoss:
             if not l.process.is_alive():
                 return False
         return True
-        
-
-    
 
 class LoaderStruct:
     """
@@ -379,6 +382,8 @@ class LoaderStruct:
     """
     def __init__(self,name,shared_mem,events,file_q,process=None):
         self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.shared_mem = shared_mem
         self.events = events
         self.q = file_q
@@ -404,7 +409,6 @@ class LoaderStruct:
         Note: when done with the data, you must call release_data()
             a lock on the shared memory is acquired
         """
-        print "ls.get_data: %s" % self.name
         shared_mem = self.shared_mem
         for m in shared_mem.itervalues():
             l = m.get_lock()
@@ -441,31 +445,32 @@ class LoaderDist(Process):
     """
     def __init__(self, name, in_q, out_q, loaders, evt_death):
         Process.__init__(self, name=name)
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.in_q = in_q
         self.out_q = out_q
         self.loaders = loaders
         self.proto_q = loaders[loaders.keys()[0]].q
-        
         self.evt_death= evt_death
 
     def run(self):
-        logging.debug("%s: starting..."% self.name)
+        self.logger.debug("%s: starting..."% self.name)
         while not self.evt_death.is_set():
             try:
                 if self.proto_q.qsize() < 2 + random.randint(2,10):
                     f_dict = self.in_q.get(True, 2)
-                    logging.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
+                    self.logger.debug("%s: distributing <%s>" % ( self.name, f_dict['file_id']) )
                     self.out_q.put(f_dict)
                     for k,v in self.loaders.iteritems():
                         v.q.put(f_dict[k])
                 else:
-                    logging.debug("%s: sleeping due to full q"%self.name)
+                    self.logger.debug("%s: sleeping due to full q"%self.name)
                     time.sleep(1)
             except Empty:#thrown by in_#thrown by in_qq
-                logging.debug("%s: starving..."%self.name)
+                self.logger.debug("%s: starving..."%self.name)
                 pass
         self.evt_death.clear()
-        logging.info("%s: exiting..." % (self.name,))
+        self.logger.info("%s: exiting..." % (self.name,))
         
     
 class Loader(Process):
@@ -508,14 +513,14 @@ class Loader(Process):
         size = np_array.size
         np_array = np_array.reshape(size)
 
-        logging.debug("%s: writing to shared memory" % (self.name,))  
+        self.logger.debug("writing to shared memory")  
         with self.smem_data.get_lock():
             self.smem_data[:size] = np_array[:]
         with self.smem_shape.get_lock():
             self.smem_shape[:len(shape)] = shape[:]
         with self.smem_dtype.get_lock():
             self.smem_dtype.value = dt_id
-        logging.debug("%s: shared memory copy complete" % (self.name,))  
+        self.logger.debug("shared memory copy complete" )  
 
 
     def _clear_mem(self):
@@ -529,46 +534,46 @@ class Loader(Process):
         return np.load(os.path.join(self.in_dir, fname))
 
     def run(self):  
-        logging.info("%s: Starting " % (self.name,)) 
+        self.logger.info("Starting ") 
         old_md5 = '0'
         #get file name for import
         fname = self.instruction_queue.get()
         new_md5 = self._get_md5(fname)
-        logging.debug("%s: loading file <%s>" %(self.name, fname))
+        self.logger.debug("loading file <%s>" %( fname))
         data = self._get_data(fname)
-        logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
+        self.logger.debug("<%s> loaded %f MB " % ( fname, data.nbytes/1048576.0))
         while True:
             self.evt_add_data.wait(self._ad_timeout)
             if self.evt_add_data.is_set():
-                logging.debug("%s: loading data into mem " % (self.name,)) 
+                self.logger.debug(" loading data into mem ") 
                 self._load_mem( data ) 
-                logging.debug("%s: clearing evt_add_data"  % (self.name, ))
+                self.logger.debug(" clearing evt_add_data" )
                 self.evt_add_data.clear()
-                logging.debug("%s: setting evt_data ready"  % (self.name, ))
+                self.logger.debug(" setting evt_data ready")
                 self.evt_data_ready.set()
-                logging.debug("%s: getting new file " % (self.name, )) 
+                self.logger.debug(" getting new file ") 
                 fname = None
                 while fname is None:
                     try:
                         fname = self.instruction_queue.get(True, self._iq_timeout) 
                     except Empty:
-                        logging.debug("%s: fname timed out " % (self.name, ))
+                        self.logger.debug(" fname timed out ")
                         if self.evt_die.is_set():
                             self.evt_die.clear()
-                            logging.info("%s: exiting... " % (self.name,) )  
+                            self.logger.info(" exiting... " )  
                             return
-                logging.debug("%s: new file <%s>" %(self.name, fname))
+                self.logger.debug(" new file <%s>" %(fname))
                 old_md5 = new_md5
                 new_md5 = self._get_md5(fname)
                 if new_md5 != old_md5:
                     #self._clear_mem()
                     data = self._get_data(fname)
-                    logging.debug("%s: <%s> loaded %f MB " % (self.name, fname, data.nbytes/1048576.0))
+                    self.logger.debug(" <%s> loaded %f MB " % (fname, data.nbytes/1048576.0))
                 else:
-                    logging.debug("%s: same data, recycle reduce reuse"  % (self.name, ))
+                    self.logger.debug(" same data, recycle reduce reuse" )
             elif self.evt_die.is_set():
                 self.evt_die.clear()
-                logging.info("%s: exiting... " % (self.name,) )  
+                self.logger.info("Exiting... " )  
                 return
 
     def _get_md5(self, fname):
@@ -666,7 +671,7 @@ def testLoader(pid=0):
                 print "Tester: packer not ready"
                 time.sleep(.1)
 
-    logging.info( "Tester: no data, all processed, killing sp")
+    self.logger.info( "Tester: no data, all processed, killing sp")
     db.kill_all()
     time.sleep(10)
     db.clean_up()

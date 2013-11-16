@@ -82,10 +82,11 @@ class Dirac:
         except:
             #pop cuda context before we raise exception
             self.logger.exception("exception, attempting cleanup" ) 
-        self.logger.debug("%s: exiting" % self.name)
+        self.logger.debug("exiting cleanup starting")
         self._heartbeat(True)
         self._delete_command_queues()
         self._catch_cuda()
+        self.logger.info("Exitting main[run()] process.")
 
     def _main(self):
         """
@@ -97,7 +98,10 @@ class Dirac:
         try:
             db = self._loaderq.next_loader_boss()
         except MaxDepth:
-            self.logger.debug("%s: exceeded max depth for LoaderBoss" % self.name)
+            if self._terminating > 0:
+                self.logger.debug("exceeded max depth for LoaderBoss")
+            else:
+                self.logger.warning("exceeded max depth for LoaderBoss")
             return False
         except:
             return False
@@ -134,8 +138,8 @@ class Dirac:
             conn = boto.sqs.connect_to_region( 'us-east-1' )
             response_q = conn.create_queue( self.sqs['response'] )
             mess = self._generate_heartbeat_message()
-            self._check_commands()
             response_q.write( mess )
+            self._check_commands()
             if self._terminating > 0:
                 self._terminator()
         else:

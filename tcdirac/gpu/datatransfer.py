@@ -22,9 +22,14 @@ import logging
 import time
 import json
 import random
+
 class Retriever(Process):
     def __init__(self, name, in_dir,  q_ret2gpu, evt_death, sqs_name, s3bucket_name, max_q_size):
         Process.__init__(self, name=name)
+        self.name = self._generate_name()
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.debug( "Init: in_dir<%s> sqs_name<%s> s3bucket_name<%s> max_q_size<%i>", (in_dir, sqs_name, s3bucket_name, max_q_size) )
         self.q_ret2gpu = q_ret2gpu
         self.sqs_name = sqs_name
         self._sqs_q = self._connect_sqs()
@@ -39,7 +44,7 @@ class Retriever(Process):
             if self.q_ret2gpu.qsize() < self.max_q_size:
                 messages = self.run_once()
             if messages < 10 and not self.evt_death.is_set():
-                logging.info("%s: starving <Retriever>" % self.name )
+                self.logger.warning("starving")
                 time.sleep(random.randint(1,10))
 
     def run_once(self):
@@ -50,21 +55,20 @@ class Retriever(Process):
                 m = json.loads(message.get_body())
                 for f in m['f_names']:
                     self.download_file( f )
-                    print "downloaded", f
+                    self.logger.debug("Downloaded <%s>" % f)
                 cont = True
                 while cont:
                     try:
                         self.q_ret2gpu.put( m, timeout=10 )
                         cont = False
                     except Full:
-                        logging.info("%s: queue_full" % self.name )
-
+                        self.logger.warning("queue_full" )
                         if self.evt_death.is_set():
                             return m_count
                 self._sqs_q.delete_message(message)
                 m_count += 1
             except:
-                logging.exception("%s: while trying to download files" % self.name)                
+                self.logger.exception("While trying to download files" )                
         return m_count
             
     def _connect_s3(self):
@@ -86,6 +90,9 @@ class Retriever(Process):
 class RetrieverQueue:
     def __init__(self,  name, in_dir,  q_ret2gpu,sqs_name, s3bucket_name):
         self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.debug( "Init: in_dir<%s> sqs_name<%s> s3bucket_name<%s> max_q_size<%i>", (in_dir, sqs_name, s3bucket_name) )
         self.in_dir = in_dir
         self.q_ret2gpu= q_ret2gpu
         self.sqs_name = sqs_name
@@ -148,6 +155,9 @@ class RetrieverQueue:
 class Poster(Process):
     def __init__(self, name, out_dir,  q_gpu2s3, evt_death, sqs_name, s3bucket_name):
         Process.__init__(self, name=name)
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.debug( "Init: out_dir<%s> sqs_name<%s> s3bucket_name<%s>", (out_dir, sqs_name, s3bucket_name) )
         self.q_gpu2s3 = q_gpu2s3
         self.sqs_name = sqs_name
         self._sqs_q = self._connect_sqs()
@@ -158,7 +168,7 @@ class Poster(Process):
         
 
     def run(self):
-        logging.info("%s: starting..." % self.name)
+        self.logger.info("starting...")
         while not self.evt_death.is_set():
             self.run_once()
 
@@ -169,12 +179,12 @@ class Poster(Process):
             m = Message(body= json.dumps(f_info) )
             self._sqs_q.write( m )
         except Empty:
-            logging.info("%s: starving <Poster>" % self.name )
+            self.logger.info("starving")
             if self.evt_death.is_set():
-                logging.info("%s: exiting..."%self.name)
+                self.logger.info("Exiting...")
                 return
         except:
-            logging.exception("%s: exception in run_once" % self.name)
+            self.logger.exception("exception in run_once")
             self.evt_death.set()
 
     def _connect_s3(self):
@@ -191,13 +201,16 @@ class Poster(Process):
         k = Key(self._s3_bucket)
         k.key = file_name
         k.set_contents_from_filename( os.path.join(self.out_dir, file_name), reduced_redundancy=True )
-        logging.debug("%s: deleting <%s>" % (self.name,  os.path.join(self.out_dir, file_name)))
+        self.logger.debug("Deleting <%s>" % (os.path.join(self.out_dir, file_name)))
         os.remove(os.path.join(self.out_dir, file_name))
 
 
 class PosterQueue:
     def __init__(self,  name, out_dir,  q_gpu2s3,sqs_name, s3bucket_name):
         self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.debug( "Init: out_dir<%s> sqs_name<%s> s3bucket_name<%s>", (out_dir, sqs_name, s3bucket_name) )
         self.out_dir = out_dir
         self.q_gpu2s3= q_gpu2s3
         self.sqs_name = sqs_name
@@ -226,6 +239,7 @@ class PosterQueue:
                     p.terminate()
                 p.join(.5)    
             d.clear()
+            self.logger.warning("Repairing poster<%i>" % i)
             self._posters[i] =  Poster(self.name + "_p" + str(i)+"_repaired", self.out_dir,  self.q_gpu2s3, d, self.sqs_name, self.s3bucket_name)
             
 
@@ -236,7 +250,7 @@ class PosterQueue:
         return False
 
     def kill_all(self):
-        logging.info("%s: sending death signals"%self.name)
+        self.logger.info("sending death signals")
         for r in self._reaper:
             r.set()
 
@@ -250,7 +264,7 @@ class PosterQueue:
             r.join()
         self._posters = []
         self._reaper = []
-        logging.info("%s: complete..."%self.name)
+        self.logger.info("Complete...")
 
 
 

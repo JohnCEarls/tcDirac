@@ -40,6 +40,8 @@ class PackerQueue:
     """
     def __init__(self, name, results_q, out_dir, data_settings):
         self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.results_q = results_q #queue containing meta information
         self.out_dir = out_dir
         self.data_settings = data_settings
@@ -90,7 +92,7 @@ class PackerQueue:
     def check_out_dir(self):
         if not os.path.exists(self.out_dir):
             os.makedirs(self.out_dir)
-            logging.info("PackerQueue: dir did not exist, created %s" % (self.out_dir))
+            self.logger.info("PackerQueue: dir did not exist, created %s" % (self.out_dir))
 
     def remove_packer_boss(self):
         if len(self._bosses) <=0:
@@ -108,7 +110,7 @@ class PackerQueue:
     def kill_all(self):
         for l in self._bosses:
             l.kill()
-            logging.debug( "%s you killed my father, prepared to die" % l.name)
+            self.logger.debug( "%s you killed my father, prepared to die" % l.name)
         for l in self._bosses:
             l.clean_up()
         self._bosses = []
@@ -129,6 +131,8 @@ class PackerQueue:
 class Packer(Process):
     def __init__(self, name,p_type, in_q, out_q, smem,events, out_dir, dr_timeout=10):
         Process.__init__(self, name=name)
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.in_q = in_q
         self.out_q = out_q
         self.shared_mem = smem
@@ -156,7 +160,7 @@ class Packer(Process):
                     
                     f_name = '_'.join([self.p_type, file_id, f_hash])
                     with open(os.path.join( self.out_dir, f_name), 'wb') as f:
-                        logging.debug("%s: Packer writing <%s>" % (self.name, f_name))
+                        self.logger.debug("%s: Packer writing <%s>" % (self.name, f_name))
                         np.save(f, data)
                     mess['f_name'] = f_name
                     #data.fill(0) 
@@ -165,17 +169,17 @@ class Packer(Process):
                     self.events['data_ready'].clear()
                     self.events['add_data'].set()
                     self.out_q.put(mess)
-                    logging.debug("%s: file_id<%s> processed" % (self.name, file_id))
+                    self.logger.debug(" file_id<%s> processed" % (file_id))
                     wait_ctr = 0
                 except Empty:
-                    logging.debug("%s: waiting on file_id" % self.name)
+                    self.logger.debug("waiting on file_id")
                     wait_ctr += 1
                     if wait_ctr > 10:
-                        logging.error("%s: Packer has data but no file_id, irrecoverable" % self.name)
+                        self.logger.error(" Packer has data but no file_id, irrecoverable")
                         raise Exception("%s: Packer has data but no file_id, irrecoverable" % self.name)
             elif self.events['die'].is_set():
                 self.events['die'].clear()
-                logging.info("%s: exiting..." % self.name)
+                self.logger.info(" exiting...")
                 return
 
     def release_data(self):
@@ -219,20 +223,21 @@ class PackerBoss:
         data_settings - (buffer_size, dtype)
     """
     def __init__(self, base_name,  out_q, out_dir, data_settings):
+        self.name = base_name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.in_q = Queue()
         self.out_q = out_q
         self.out_dir = out_dir
         self.data_settings = data_settings
-        
-        self.name = base_name
         self.packer = self._create_packer( 'p_' + base_name )
     
     def start(self):
-        logging.debug("%s: starting packer.." %(self.name))
+        self.logger.debug(" starting packer..")
         self.packer.start()
 
     def kill(self):
-        logging.debug("%s: killing packer.." %(self.name))
+        self.logger.debug(" killing packer..")
         self.packer.die()
 
     def ready(self):
@@ -255,7 +260,7 @@ class PackerBoss:
         #with data_settings for loader
         for ds in self.data_settings:
             rms, dsize, dtype = ds
-        logging.debug("%s: creating packer.." %(self.name))
+        self.logger.debug(" creating packer..")
         sm = self._create_shared( dsize, dtype)
         ev = self._create_events()
         p = Packer(name,p_type, self.in_q, self.out_q, sm,ev, self.out_dir)
@@ -263,7 +268,7 @@ class PackerBoss:
         return ps
 
     def _create_shared(self, dsize, dtype):
-        logging.debug("%s: creating shared_memory.." %(self.name))
+        self.logger.debug(" creating shared_memory..")
         shared_mem = {}
         shared_mem['data'] = Array(dtypes.to_ctypes(dtype),dsize )
         with shared_mem['data'].get_lock():
@@ -285,16 +290,16 @@ class PackerBoss:
         return events
 
     def clean_up(self):
-        logging.debug("%s: cleaning up." %(self.name))
+        self.logger.debug(" cleaning up.")
         ctr = 0
         while self.packer.process.is_alive() and ctr < 5:
             time.sleep(1)
             ctr += 1
         if self.packer.process.is_alive():
-            logging.debug("%s: killing the hard way" %(self.name))
+            self.logger.debug(" killing the hard way")
             self.packer.process.terminate()
         self.packer.process.join()
-        logging.debug("%s: This house is clean" %(self.name))
+        self.logger.debug(" This house is clean")
 
     def is_alive(self):
         return self.packer.process.is_alive()
@@ -307,6 +312,8 @@ class PackerStruct:
     """
     def __init__(self, name,shared_mem, events, in_q,out_q, process=None):
         self.name = name
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.shared_mem = shared_mem
         self.in_q = in_q
         self.out_q = out_q
@@ -316,7 +323,6 @@ class PackerStruct:
     def start(self):
         for e in self.events.itervalues():
             e.clear()
-        
         self.process.start()
 
     def die(self):
@@ -335,7 +341,3 @@ class PackerStruct:
 
     def release_mem(self):
         self.data_lock.release()
-
-
-
-
