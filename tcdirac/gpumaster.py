@@ -57,10 +57,15 @@ class Dirac:
         #see - _terminator for mor info
         self._makedirs()
         self._get_settings( init_q )
-        self._init_subprocesses()
+        try:
+            self._init_subprocesses()
+        except:
+            self.logger.error("Error on creation of subprocesses, cleanup resources and reraise")
+            raise    
         #counters
         self._hb = 0
         self._tcount = 0
+        self.ctx = None
 
     def set_logging_level(self, level):
         self.logger.setLevel(level)
@@ -69,23 +74,28 @@ class Dirac:
         """
         The main entry point
         """
-        self.logger.info("Entering main[run()] process.")
-        self._init_gpu()
-        self.start_subprocesses()
-        self.logger.debug("starting main loop.")
+        
         try:
+            self.logger.info("Entering main[run()] process.")
+            self._init_gpu()
+            self.start_subprocesses()
+            self.logger.debug("starting main loop.")
             while self._terminating < 5:
                 res = self._main()
                 if not res:
                     self.logger.debug("error in main <loader>") 
                 self._heartbeat()
         except:
-            #pop cuda context before we raise exception
             self.logger.exception("exception, attempting cleanup" ) 
-        self.logger.debug("exiting cleanup starting")
-        self._heartbeat(True)
-        self._delete_command_queues()
-        self._catch_cuda()
+        self.logger.debug("Starting Cleanup")
+        try:
+            self._heartbeat(True)
+        except:
+            self.logger.exception("Noone can hear my heart beating, passing error as we are in cleanup")
+        try:
+            self._hard_clean_up()
+        except:
+            self.logger.exception("Hard cleanup failed")
         self.logger.info("Exitting main[run()] process.")
 
     def _main(self):
@@ -133,15 +143,19 @@ class Dirac:
         Phones home to let master know the status of our gpu node
         """
         if self._hb >= self._hb_interval or force:
-            self.logger.debug("sending heartbeat")
-            self._hb = 0
-            conn = boto.sqs.connect_to_region( 'us-east-1' )
-            response_q = conn.create_queue( self.sqs['response'] )
-            mess = self._generate_heartbeat_message()
-            response_q.write( mess )
-            self._check_commands()
-            if self._terminating > 0:
-                self._terminator()
+            try:
+                self.logger.debug("sending heartbeat")
+                self._hb = 0
+                conn = boto.sqs.connect_to_region( 'us-east-1' )
+                response_q = conn.create_queue( self.sqs['response'] )
+                mess = self._generate_heartbeat_message()
+                response_q.write( mess )
+                self._check_commands()
+                if self._terminating > 0:
+                    self._terminator()
+            except:
+                self.logger.exception("Heartbeat transmit failed.")
+                raise
         else:
             self._hb += 1
 
@@ -213,7 +227,6 @@ class Dirac:
         """
         Given a command from master, initiate change indicated
         """
-        print command
         if command['message-type'] == 'termination-notice':
             #master says die
             self.logger.debug("%s: received termination notice" % self.name)
@@ -233,20 +246,31 @@ class Dirac:
         Create a message for master informing current
         state of gpu
         """
-        message = {}
-        message['message-type'] = 'gpu-heartbeat'
-        message['name'] = self.name
-        message['num-packer'] = self._packerq.num_sub()
-        message['num-poster'] = self._posterq.num_sub()
-        message['num-retriever'] = self._retrieverq.num_sub()
-        message['num-loader'] = self._loaderq.num_sub()
-        message['source-q'] = self._source_q.qsize()
-        message['result-q'] = self._result_q.qsize()
-        message['terminating'] = self._terminating
-        message['time'] = time.time()
+        message = self._generate_heartbeat_dict()
         self.logger.debug("heartbeat: %s" % json.dumps(message))
         return Message(body=json.dumps(message))
-    
+
+    def _generate_heartbeat_dict(self):
+        """
+        Creates the dictionary holding state information for heartbeat
+        """
+
+        message = {}
+        message['message-type'] = 'gpu-heartbeat'
+        try:
+            message['name'] = self.name
+            message['num-packer'] = self._packerq.num_sub()
+            message['num-poster'] = self._posterq.num_sub()
+            message['num-retriever'] = self._retrieverq.num_sub()
+            message['num-loader'] = self._loaderq.num_sub()
+            message['source-q'] = self._source_q.qsize()
+            message['result-q'] = self._result_q.qsize()
+            message['terminating'] = self._terminating
+            message['time'] = time.time()
+        except:
+            self.logger.exception("Heartbeat message generation error")
+            raise
+        return message
 
     def _init_gpu(self):
         """
@@ -262,11 +286,12 @@ class Dirac:
         In case of an uncaught, unrecoverable exception
         pop the gpu context
         """
-        try:
-            self.logger.info("killing cuda")
-            self.ctx.pop()
-        except:
-            self.logger.exception("unable to successfully clear context, this attempt most likely after a different error") 
+        if self.ctx is not None:
+            try:
+                self.logger.info("killing cuda")
+                self.ctx.pop()
+            except:
+                self.logger.error("unable to successfully clear context") 
 
 
     def _get_settings(self, init_q_name):
@@ -291,14 +316,13 @@ class Dirac:
         message = {'message-type':'gpu-init', 'name': self.name, 'instance-id': md['instance-id'], 'command' : self.sqs['command'], 'response' : self.sqs['response'], 'zone':self._availabilityzone }
         m = Message(body=json.dumps(message))
         init_q.write( m )
-        command_q = conn.create_queue( self.sqs['command'] )
+        command_q = conn.get_queue( self.sqs['command'] )
         command = None
         ctr = 0
         while command is None and ctr < 10 :
             command = command_q.read(  wait_time_seconds=20 ) 
             ctr += 1
         if command is None:
-            self._delete_command_queues()
             self.logger.error("%s: Attempted to retrieve setup and no instructions received." % name)
             raise Exception("Waited 200 seconds and no instructions, exitting.")
         parsed = json.loads(command.get_body())
@@ -327,7 +351,7 @@ class Dirac:
         for k in data_settings.iterkeys():
             new_data_settings[k] = []
             for dt, size, dtype in data_settings[k]:
-                self.logger.debug("data_settings[%s]: (%s, %i, %s )" %( dt, size, dtypes.nd_list[dtype]))
+                self.logger.debug("data_settings[%s]: (%s, %i, %s )" %(k, dt, size, dtypes.nd_list[dtype]))
                 new_data_settings[k].append( (dt, size, dtypes.nd_list[dtype]) )
         return new_data_settings
 
@@ -340,7 +364,7 @@ class Dirac:
         conn = boto.sqs.connect_to_region( 'us-east-1' )
         response_q = conn.create_queue( self.sqs['response'] )
         command_q = conn.create_queue( self.sqs['command'] )
-        #check
+        #check that queue was actually created
         command_q = None
         while command_q is None:
             command_q = conn.get_queue( self.sqs['command'] )
@@ -357,19 +381,22 @@ class Dirac:
         """
         conn = boto.sqs.connect_to_region( 'us-east-1' )
         command_q = conn.get_queue( self.sqs['command'] )
-        command_q.delete()
+        if command_q is not None:
+            self.logger.warning("Deleting [%s]" %  self.sqs['command'])
+            command_q.delete()
         response_q = conn.get_queue( self.sqs['response'] )
-        ctr = 0
-        while response_q.count() > 0 and ctr < 10:
-            self.logger.warning("Trying to delete queue, but have unread messages in response queue.")
-            time.sleep(1)
-            ctr += 1
-        if response_q.count():
-            dump_path = os.path.join(self.directories['log'], self.name + "-response-queue-unsent.log")
-            self.logger.warning("Dumping response queue to [%s]" % (dump_path,)    )
-            response_q.dump(dump_path, sep='\n\n')
-        self.logger.debug( "Deleting Response Queue")
-        response_q.delete()
+        if response_q is not None:
+            ctr = 0
+            while response_q.count() > 0 and ctr < 10:
+                self.logger.warning("Trying to delete queue, but have unread messages in response queue.")
+                time.sleep(1)
+                ctr += 1
+            if response_q.count():
+                dump_path = os.path.join(self.directories['log'], self.name + "-response-queue-unsent.log")
+                self.logger.warning("Dumping response queue to [%s]" % (dump_path,)    )
+                response_q.dump(dump_path, sep='\n\n')
+            self.logger.warning( "Deleting [%s]" % self.sqs['response'] )
+            response_q.delete()
 
     def _generate_name(self):
         """
@@ -386,10 +413,10 @@ class Dirac:
         self.logger.debug("Initializing subprocesses")
         self._source_q = Queue()#queue containing names of source data files for processing
         self._result_q = Queue()#queue containing names of result data files from processing
-        self._retrieverq = RetrieverQueue( self.name + "_rq", self.directories['source'], self._source_q, self.sqs['source'], self.s3['source'] )
-        self._posterq = PosterQueue( self.name + "_poq", self.directories['results'], self._result_q, self.sqs['results'], self.s3['results'] )
-        self._loaderq = LoaderQueue( self.name + "_lq", self._source_q, self.directories['source'], data_settings = self.data_settings['source'] )
-        self._packerq = PackerQueue( self.name + "_paq", self._result_q, self.directories['results'], data_settings = self.data_settings['results'] )
+        self._retrieverq = RetrieverQueue( self.name + "_RetrieverQueue", self.directories['source'], self._source_q, self.sqs['source'], self.s3['source'] )
+        self._posterq = PosterQueue( self.name + "_PosterQueue", self.directories['results'], self._result_q, self.sqs['results'], self.s3['results'] )
+        self._loaderq = LoaderQueue( self.name + "_LoaderQueue", self._source_q, self.directories['source'], data_settings = self.data_settings['source'] )
+        self._packerq = PackerQueue( self.name + "_PackerQueue", self._result_q, self.directories['results'], data_settings = self.data_settings['results'] )
         self.logger.debug("Subprocesses Initialized" )
         
 
@@ -450,6 +477,18 @@ class Dirac:
         self._posterq.kill_all()
         self._posterq.clean_up()
 
+
+    def _hard_clean_up(self):
+        """
+        This cleans up anything that did not end gracefully
+        """
+        self.logger.info("Hard Cleanup routine")
+        self._delete_command_queues()
+        for c in multiprocessing.active_children():
+            self.logger.warning("Hard kill [%s]" % c.name)
+            c.terminate()
+        self._catch_cuda()
+
     def _makedirs(self):
         """
         Creates directories listed in directories
@@ -473,26 +512,31 @@ class Dirac:
                             raise
 
 def mockMaster( master_q = 'tcdirac-master'):
-    conn = boto.sqs.connect_to_region( 'us-east-1' )
-    in_q = conn.get_queue( master_q )
-    m = None
-    while m is None:
-        logging.info("MM waiting for message.. ")
-        m = in_q.read( wait_time_seconds=20 )
-    in_q.delete_message(m)
-    settings = json.loads(m.get_body())
-    print settings
-    rq = conn.get_queue( settings['response'] )
-    cq = conn.get_queue( settings['command'] )
+    try:
+        conn = boto.sqs.connect_to_region( 'us-east-1' )
+        in_q = conn.get_queue( master_q )
+        m = None
+        while m is None:
+            print "MM: waiting for message.. "
+            m = in_q.read( wait_time_seconds=20 )
+        in_q.delete_message(m)
+        settings = json.loads(m.get_body())
+        print "MM: ", str(settings)
+        rq = conn.get_queue( settings['response'] )
+        cq = conn.get_queue( settings['command'] )
 
-    m = Message(body=get_gpu_message())
+        m = Message(body=get_gpu_message())
 
-    cq.write(m)
+        cq.write(m)
 
-    time.sleep(10)
-    print "Sending terminate signal"
-    cq.write( Message(body=get_terminate_message()))
-
+        time.sleep(10)
+        print "MM: Sending terminate signal"
+        cq.write( Message(body=get_terminate_message()))
+    except:
+        print "*"*30
+        print "Error in mockMaster"
+        print "*"*30
+        raise
 
 def get_gpu_message():
     parsed = {}
@@ -535,6 +579,6 @@ if __name__ == "__main__":
     directories['log'] = '/scratch/sgeadmin/logs'
 
     init_q = 'tcdirac-master'
-
+    
     d = Dirac( directories, init_q )
     d.run()

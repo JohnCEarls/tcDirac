@@ -18,6 +18,7 @@ import os
 import os.path
 
 import tcdirac
+from tcdirac import static
 import logging
 import time
 import json
@@ -26,7 +27,7 @@ import random
 class Retriever(Process):
     def __init__(self, name, in_dir,  q_ret2gpu, evt_death, sqs_name, s3bucket_name, max_q_size):
         Process.__init__(self, name=name)
-        self.name = self._generate_name()
+        self.name = name
         self.logger = logging.getLogger(self.name)
         self.logger.setLevel(static.logging_base_level)
         self.logger.debug( "Init: in_dir<%s> sqs_name<%s> s3bucket_name<%s> max_q_size<%i>", (in_dir, sqs_name, s3bucket_name, max_q_size) )
@@ -107,7 +108,7 @@ class RetrieverQueue:
         else:
             evt_death = Event()
             evt_death.clear()
-            self._retrievers.append( Retriever(self.name + "_r" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*(num+1)  ) )
+            self._retrievers.append( Retriever(self.name + "_Retriever_" + str(num), self.in_dir,  self.q_ret2gpu, evt_death, self.sqs_name, self.s3bucket_name, max_q_size=10*(num+1)  ) )
             self._reaper.append(evt_death)
             self._retrievers[-1].daemon = True
             self._retrievers[-1].start()
@@ -122,7 +123,7 @@ class RetrieverQueue:
                     p.terminate()
                 p.join(.5)    
             d.clear()
-            self._retrievers[i] =  Retriever(self.name + "_p" + str(i)+"_repaired", self.in_dir,  self.q_ret2gpu, d, self.sqs_name, self.s3bucket_name, max_q_size=10*i)
+            self._retrievers[i] =  Retriever(self.name + "_Retriever_" + str(i)+"_repaired", self.in_dir,  self.q_ret2gpu, d, self.sqs_name, self.s3bucket_name, max_q_size=10*i)
 
     def kill_all(self):
         for r in self._reaper:
@@ -224,7 +225,7 @@ class PosterQueue:
         else:
             evt_death = Event()
             evt_death.clear()
-            self._posters.append( Poster(self.name + "_p" + str(num), self.out_dir,  self.q_gpu2s3, evt_death, self.sqs_name, self.s3bucket_name))
+            self._posters.append( Poster(self.name + "_Poster_" + str(num), self.out_dir,  self.q_gpu2s3, evt_death, self.sqs_name, self.s3bucket_name))
             self._reaper.append(evt_death)
             self._posters[-1].daemon = True
             self._posters[-1].start()

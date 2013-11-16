@@ -30,6 +30,7 @@ import pandas
 
 import pycuda.driver as cuda
 
+from tcdirac import static
 import tcdirac.dtypes as dtypes
 from tcdirac.gpu import processes
 from loader import MaxDepth 
@@ -54,7 +55,7 @@ class PackerQueue:
         if num <= 0:
             return
         else:
-            self._bosses.append( PackerBoss( 'pb_' + str(len(self._bosses)), self.results_q,self.out_dir, self.data_settings) )
+            self._bosses.append( PackerBoss(self.name+ '_PackerBoss_' + str(len(self._bosses)), self.results_q,self.out_dir, self.data_settings) )
             self._bosses_skip.append(0)
             self._bosses[-1].start()
             self.add_packer_boss( num - 1)
@@ -110,7 +111,7 @@ class PackerQueue:
     def kill_all(self):
         for l in self._bosses:
             l.kill()
-            self.logger.debug( "%s you killed my father, prepared to die" % l.name)
+            self.logger.debug( "Killing [%s]" % l.name)
         for l in self._bosses:
             l.clean_up()
         self._bosses = []
@@ -160,7 +161,7 @@ class Packer(Process):
                     
                     f_name = '_'.join([self.p_type, file_id, f_hash])
                     with open(os.path.join( self.out_dir, f_name), 'wb') as f:
-                        self.logger.debug("%s: Packer writing <%s>" % (self.name, f_name))
+                        self.logger.debug("Packer writing <%s>" % (f_name))
                         np.save(f, data)
                     mess['f_name'] = f_name
                     #data.fill(0) 

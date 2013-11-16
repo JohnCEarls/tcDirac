@@ -22,7 +22,7 @@ import ctypes
 import numpy as np
 import scipy.misc
 import pandas
-
+from tcdirac import static
 import pycuda.driver as cuda
 
 import tcdirac.dtypes as dtypes
@@ -110,7 +110,7 @@ class LoaderQueue:
         if num <= 0:
             return
         else:
-            self._bosses.append( LoaderBoss( 'lb_' + str(len(self._bosses)), self.file_q,self.in_dir, self.data_settings) )
+            self._bosses.append( LoaderBoss('_'.join([self.name, 'LoaderBoss',str(len(self._bosses))]), self.file_q,self.in_dir, self.data_settings) )
             self._bosses_skip.append(0)
             self._bosses[-1].start()
             self._bosses[-1].set_add_data()
@@ -121,13 +121,14 @@ class LoaderQueue:
             raise Exception("No Loaders")
         if max_depth is None:
             max_depth = 2*len(self._bosses)#default max_depth to 2 passes of the queue
+            logging.debug( "Max depth set[%i]", max_depth) 
         if max_depth <= 0:
+            self.logger.debug("Exceeded Max Depth")
             raise MaxDepth("Max Depth exceeded")            
 
         self._curr = (self._curr + 1)%len(self._bosses)
         if self._bosses[self._curr].wait_data_ready(time_out=time_out):
             self._bosses_skip[self._curr] = 0
-            print "md", max_depth
             return self._bosses[self._curr]
         else:
             self._bosses_skip[self._curr] += 1
@@ -140,7 +141,7 @@ class LoaderQueue:
             temp.append(self._bosses[i])
             self._bosses[i].kill_all()
         for i in over_limit:
-            self._bosses[i] =  LoaderBoss( 'lb_' + str(i), self.file_q, self.data_settings) 
+            self._bosses[i] =  LoaderBoss('_'.join([self.name,'LoaderBoss',str(i)]) , self.file_q, self.data_settings) 
             self._bosses_skip[i] = 0
         for l in temp:
             l.clean_up()
@@ -161,7 +162,7 @@ class LoaderQueue:
     def kill_all(self):
         for l in self._bosses:
             l.kill_all()
-            print "%s you killed my father, prepared to die" % l.name
+            self.logger.info("killing [%s]" % l.name)
         for l in self._bosses:
             l.clean_up()
           
@@ -206,7 +207,7 @@ class LoaderBoss:
         self.data_settings = data_settings
         self.loaders = self._create_loaders('_'.join(['proc',name]), data_settings)
         self.loader_dist = self._create_loader_dist()
-        self._terminator = Process( target=kill_all, args=(self.name, self.loaders, self._ld_die_evt, self.loader_dist, file_q))
+        self._terminator = Process( target=kill_all, args=(self.name + '-kill_all-sp', self.loaders, self._ld_die_evt, self.loader_dist, file_q))
 
     def get_file_id(self):
         """
@@ -320,20 +321,20 @@ class LoaderBoss:
 
     def _create_loader_dist(self):
         self._ld_die_evt = Event()
-        return LoaderDist( '_'.join([self.name,'ld']), self.file_q, self.id_q, self.loaders, self._ld_die_evt)
+        return LoaderDist( '_'.join([self.name,'loader_dist']), self.file_q, self.id_q, self.loaders, self._ld_die_evt)
 
     def _create_loaders(self, name, data_settings):
         loaders = {}
         for name, dsize, dtype in data_settings:
-            loaders[name] = self._create_loader( '_'.join([name,name]), dsize, dtype )
+            loaders[name] = self._create_loader( '_'.join([self.name,name]), dsize, dtype )
         return loaders
 
     def _create_loader(self,name, dsize, dtype):
         smem = self._create_shared(dsize, dtype)
         evts = self._create_events()
         file_q = Queue()
-        l = Loader(file_q, evts, smem, self.in_dir, name)
-        ls = LoaderStruct(name,smem,evts,file_q, process=l)
+        l = Loader(file_q, evts, smem, self.in_dir, name+'-Loader')
+        ls = LoaderStruct(name+'-loaderStruct',smem,evts,file_q, process=l)
         return ls
 
     def _create_shared(self, dsize, dtype):
@@ -491,6 +492,8 @@ class Loader(Process):
             inst_q_timeout = time in seconds before you check for death when waiting for new filename
         """
         Process.__init__(self, name=name)
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
         self.daemon = True 
         self.instruction_queue = inst_q
         self.smem_data = shared_mem['data']
