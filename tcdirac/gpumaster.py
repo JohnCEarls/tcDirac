@@ -21,6 +21,7 @@ from gpu.loader import LoaderBoss, LoaderQueue, MaxDepth
 from gpu.results import PackerBoss, PackerQueue
 from gpu import sharedprocesses
 from gpu import data
+import static
 
 class PosterProgress(Exception):
     pass
@@ -45,6 +46,9 @@ class Dirac:
     """
     def __init__(self, directories, init_q ):
         self.name = self._generate_name()
+        self.logger = logging.getLogger(self.name)
+        self.logger.setLevel(static.logging_base_level)
+        self.logger.info("Initializing: directories<%s> init_q<%s>" % (json.dumps(directories), init_q) )
         self.s3 = {'source':None, 'results':None} 
         self.sqs = {'source':None, 'results':None, 'command': self.name + '-command' , 'response': self.name + '-response' }
         self.directories = directories
@@ -54,26 +58,31 @@ class Dirac:
         self._makedirs()
         self._get_settings( init_q )
         self._init_subprocesses()
+        #counters
         self._hb = 0
         self._tcount = 0
+
+    def set_logging_level(self, level):
+        self.logger.setLevel(level)
 
     def run(self):
         """
         The main entry point
         """
+        self.logger.info("Entering main[run()] process.")
         self._init_gpu()
         self.start_subprocesses()
-        logging.info("%s starting main loop."%self.name)
+        self.logger.debug("starting main loop.")
         try:
             while self._terminating < 5:
                 res = self._main()
                 if not res:
-                    logging.info("%s: error in main <loader>" %self.name)
+                    self.logger.debug("error in main <loader>") 
                 self._heartbeat()
         except:
             #pop cuda context before we raise exception
-            logging.exception("%s: exception, attempting cleanup" %self.name) 
-        logging.info("%s: exiting" % self.name)
+            self.logger.exception("exception, attempting cleanup" ) 
+        self.logger.debug("%s: exiting" % self.name)
         self._heartbeat(True)
         self._delete_command_queues()
         self._catch_cuda()
@@ -83,10 +92,12 @@ class Dirac:
         This runs the primary logic for gpu
         """
         #get next available data
+        #avoiding logging for the main process
+        #lean and mean
         try:
             db = self._loaderq.next_loader_boss()
         except MaxDepth:
-            logging.info("%s: exceeded max depth for LoaderBoss" % self.name)
+            self.logger.debug("%s: exceeded max depth for LoaderBoss" % self.name)
             return False
         except:
             return False
@@ -118,7 +129,7 @@ class Dirac:
         Phones home to let master know the status of our gpu node
         """
         if self._hb >= self._hb_interval or force:
-            logging.info("%s: sending heartbeat"%self.name)
+            self.logger.debug("sending heartbeat")
             self._hb = 0
             conn = boto.sqs.connect_to_region( 'us-east-1' )
             response_q = conn.create_queue( self.sqs['response'] )
@@ -144,7 +155,7 @@ class Dirac:
         self._tcount += 1
         if self._tcount > 100:
             #we've tried to clean up too much
-            logging.error("%s: Unable to exit cleanly, getting dirty" % self.name )
+            self.logger.critical("Unable to exit cleanly, getting dirty" )
             for c in multiprocessing.active_children():
                 c.terminate()
 
@@ -201,7 +212,7 @@ class Dirac:
         print command
         if command['message-type'] == 'termination-notice':
             #master says die
-            logging.info("%s: received termination notice" % self.name)
+            self.logger.debug("%s: received termination notice" % self.name)
             self._soft_kill_retriever()
             self._terminating = 1
         if command['message-type'] == 'configuration-change':
@@ -229,7 +240,7 @@ class Dirac:
         message['result-q'] = self._result_q.qsize()
         message['terminating'] = self._terminating
         message['time'] = time.time()
-        print "hb mess:", message
+        self.logger.debug("heartbeat: %s" % json.dumps(message))
         return Message(body=json.dumps(message))
     
 
@@ -237,6 +248,7 @@ class Dirac:
         """
         Initialize gpu context
         """
+        self.logger.info("starting cuda")
         cuda.init()
         dev = cuda.Device( self.gpu_id )
         self.ctx = dev.make_context()
@@ -247,9 +259,10 @@ class Dirac:
         pop the gpu context
         """
         try:
+            self.logger.info("killing cuda")
             self.ctx.pop()
         except:
-            logging.exception("%s: unable to successfully clear context, this attempt most likely after a different error" %self.name)
+            self.logger.exception("unable to successfully clear context, this attempt most likely after a different error") 
 
 
     def _get_settings(self, init_q_name):
@@ -266,7 +279,7 @@ class Dirac:
             time.sleep(1+ctr**2)
             ctr += 1
         if init_q is None:
-            logging.error("%s: Unable to connect to init q" %self.name)
+            self.logger.error("Unable to connect to init q")
             raise Exception("Unable to connect to init q")
         md =  boto.utils.get_instance_metadata()
         self._availabilityzone = md['placement']['availability-zone']
@@ -282,12 +295,12 @@ class Dirac:
             ctr += 1
         if command is None:
             self._delete_command_queues()
-            logging.error("%s: Attempted to retrieve setup and no instructions received." % name)
+            self.logger.error("%s: Attempted to retrieve setup and no instructions received." % name)
             raise Exception("Waited 200 seconds and no instructions, exitting.")
         parsed = json.loads(command.get_body())
         self._set_settings( parsed ) 
         command_q.delete_message( command )
-        logging.info("%s: sqs< %s > s3< %s > ds< %s > gpu_id< %s >" % (self.name, str(self.sqs), str(self.s3), str(self.data_settings), str(self.gpu_id)) )
+        self.logger.debug("sqs< %s > s3< %s > ds< %s > gpu_id< %s >" % (str(self.sqs), str(self.s3), str(self.data_settings), str(self.gpu_id)) )
 
     def _set_settings( self, command):
         """
@@ -310,7 +323,7 @@ class Dirac:
         for k in data_settings.iterkeys():
             new_data_settings[k] = []
             for dt, size, dtype in data_settings[k]:
-                logging.info("%s: data_settings[%s]: (%s, %i, %s )" %(self.name, k, dt, size, dtypes.nd_list[dtype]))
+                self.logger.debug("data_settings[%s]: (%s, %i, %s )" %( dt, size, dtypes.nd_list[dtype]))
                 new_data_settings[k].append( (dt, size, dtypes.nd_list[dtype]) )
         return new_data_settings
 
@@ -344,11 +357,14 @@ class Dirac:
         response_q = conn.get_queue( self.sqs['response'] )
         ctr = 0
         while response_q.count() > 0 and ctr < 10:
-            logging.info("%s: have unread messages in response queue." % self.name)
+            self.logger.warning("Trying to delete queue, but have unread messages in response queue.")
             time.sleep(1)
             ctr += 1
         if response_q.count():
-            response_q.dump(os.path.join(self.directories['log'], self.name + "-response-queue-unsent.log"), sep='\n\n')
+            dump_path = os.path.join(self.directories['log'], self.name + "-response-queue-unsent.log")
+            self.logger.warning("Dumping response queue to [%s]" % (dump_path,)    )
+            response_q.dump(dump_path, sep='\n\n')
+        self.logger.debug( "Deleting Response Queue")
         response_q.delete()
 
     def _generate_name(self):
@@ -363,21 +379,21 @@ class Dirac:
         """
         Initializes (but does not start) worker processes.
         """
-        logging.info("%s: Initializing subprocesses" % self.name)
+        self.logger.debug("Initializing subprocesses")
         self._source_q = Queue()#queue containing names of source data files for processing
         self._result_q = Queue()#queue containing names of result data files from processing
         self._retrieverq = RetrieverQueue( self.name + "_rq", self.directories['source'], self._source_q, self.sqs['source'], self.s3['source'] )
         self._posterq = PosterQueue( self.name + "_poq", self.directories['results'], self._result_q, self.sqs['results'], self.s3['results'] )
         self._loaderq = LoaderQueue( self.name + "_lq", self._source_q, self.directories['source'], data_settings = self.data_settings['source'] )
         self._packerq = PackerQueue( self.name + "_paq", self._result_q, self.directories['results'], data_settings = self.data_settings['results'] )
-        logging.info("%s: Subprocesses Initialized" % self.name )
+        self.logger.debug("Subprocesses Initialized" )
         
 
     def start_subprocesses(self):
         """
         Starts subprocesses
         """
-        logging.info("%s: starting subprocesses" %self.name)
+        self.logger.debug("Starting subprocesses")
         self._retrieverq.add_retriever(5)
         self._posterq.add_poster(5)
         self._loaderq.add_loader_boss(5)
@@ -389,7 +405,7 @@ class Dirac:
         Returns true if all retriever processes have been killed
         False if still trying to kill.
         """
-        logging.info("%s: attempting soft_kill_retriever" %self.name)
+        self.logger.debug("attempting soft_kill_retriever" )
         if not self._retrieverq.all_dead():
             self._retrieverq.kill_all()
             return False
@@ -401,6 +417,7 @@ class Dirac:
         """
         Terminates retriever subprocesses
         """
+        self.logger.debug("Hard Kill Retriever")
         self._retrieverq.clean_up()
 
     def _soft_kill_poster(self):
@@ -444,11 +461,11 @@ class Dirac:
                     try:
                         os.makedirs(p)
                     except:
-                        logging.error("%s: tried to make directory [%s], failed." %(self.name, p) )
+                        self.logger.error("tried to make directory [%s], failed." %p )
                         #might have multiple procs trying this, if already done, ignore
                         error = True
                         if ctr >= 10:
-                            logging.error("%s: failed to create directory too many times." % self.name)
+                            self.logger.error("failed to create directory too many times." )
                             raise
 
 def mockMaster( master_q = 'tcdirac-master'):
@@ -503,7 +520,7 @@ def get_terminate_message():
     return json.dumps(parsed)
     
 if __name__ == "__main__":
-    debug.initLogging("tcdirac_gpu_test.log", logging.INFO, st_out=True)
+    debug.initLogging()
     p = Process(target=mockMaster)
     p.daemon = True
     p.start()
