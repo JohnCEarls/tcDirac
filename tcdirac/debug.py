@@ -13,8 +13,7 @@ import struct
 import socket
 from multiprocessing import Process, Event
 
-class LoggingServerError(Exception):
-    pass
+import static
 
 class TimeTracker:
     def __init__(self):
@@ -44,34 +43,6 @@ class TimeTracker:
         print "Working Time:", self._working
         print "working/waiting", self._working/self._waiting
         print
-
-def initLogging(lname="tcdirac",level=logging.DEBUG, st_out=True):
-    try:
-        rank = MPI.COMM_WORLD.rank
-    except NameError:
-        rank = 0
-    logdir = '/scratch/sgeadmin/logs/'
-    if rank == 0:
-        if not os.path.exists(logdir):
-            os.makedirs(logdir)
-    else:
-        while not os.path.exists(logdir):
-            time.sleep(1)
-
-    log_format = '%(asctime)s - %(name)s rank['+str( rank )+']- %(levelname)s - %(message)s'
-    logging.basicConfig(filename=os.path.join(logdir,lname), level=level, format=log_format)
-    logging.info("Starting")
-    if st_out:
-        sendLogSO()
-    
-
-def sendLogSO():
-    root = logging.getLogger()
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    root.addHandler(ch)
 """
 Below is lightly modified from http://docs.python.org/2/howto/logging-cookbook.html#logging-cookbook
 """
@@ -154,7 +125,7 @@ def startLogger():
         print
         pass
 
-def initLogging(server='localhost', port=logging.handlers.DEFAULT_TCP_LOGGING_PORT, server_level=logging.ERROR, sys_out_level=logging.DEBUG):
+def initLogging(server='localhost', port=logging.handlers.DEFAULT_TCP_LOGGING_PORT, server_level=static.logging_server_level, sys_out_level=static.logging_stdout_level):
     rootLogger = logging.getLogger('')
     rootLogger.setLevel(logging.DEBUG)
     socketHandler = logging.handlers.SocketHandler(server, port)
@@ -174,4 +145,4 @@ if __name__ == "__main__":
         logging.error("test")
         logger = logging.getLogger("test1-new")
         logger.error("test")
-        
+
