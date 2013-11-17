@@ -174,9 +174,6 @@ class Dirac:
         if self._tcount > 100:
             #we've tried to clean up too much
             self.logger.critical("Unable to exit cleanly, getting dirty" )
-            for c in multiprocessing.active_children():
-                c.terminate()
-
             raise Exception("Unable to exit cleanly")
         elif self._terminating == 1:
             #one means soft kill on retriever, so hopefully the pipeline will runout
@@ -232,14 +229,96 @@ class Dirac:
             self.logger.debug("%s: received termination notice" % self.name)
             self._soft_kill_retriever()
             self._terminating = 1
-        if command['message-type'] == 'configuration-change':
-            #master says change config
-            #TODO
-            raise Exception("Unimplemented")
         if command['message-type'] == 'load-balance':
+            self._handle_load_balance(command)
             #master says we are inefficient
             #TODO
             raise Exception("Unimplemented")
+
+    def _handle_load_balance(self, command):
+        """
+        Adds or removes subprocesses
+        command is structured
+        command['message-type'] = 'load-balance'
+        command['process'] in ['loader','poster','packer', 'retriever']
+        command['type'] in ['add','remove']
+        command['increment'] =  integer
+        command['min'] = integer !for remove only
+        """
+
+        if command['process'] == 'loader':
+            self._loaderq(command)
+        if command['process'] == 'poster':
+            self._lb_poster(command)
+        if command['process'] == 'packer':
+            self._lb_packer(command)
+        if command['process'] == 'retriever':
+            self._lb_retriever(command)
+
+    def _lb_loader(self, command):
+        """
+        Load Balance on Loader
+        """
+        if command['type'] == 'add':
+            self._loaderq.add_loader_boss(num=command['increment'])
+        if command['type'] == 'remove':
+            num_to_remove = command['increment']
+            try:
+                for i in range(num_to_remove):
+                    if self._loaderq.num_sub > command['min']:
+                        self._loaderq.remove_loader_boss()
+            except:
+                self.logger.exception("Error on removing loader")
+                raise
+
+    def _lb_poster(self,command):
+        """
+        Load Balance on Poster
+        """
+        if command['type'] == 'add':
+            self._posterq.add_poster(num=command['increment'])
+        if command['type'] == 'remove':
+            num_to_remove = command['increment']
+            try:
+                for i in range(num_to_remove):
+                    if self._posterq.num_sub > command['min']:
+                        self._posterq.remove_poster()
+            except:
+                self.logger.exception("Error on removing poster")
+                raise
+
+    def _lb_packer(self, command):
+        """
+        Load Balance on Packer 
+        """
+        if command['type'] == 'add':
+            self._packerq.add_packer_boss(num=command['increment'])
+        if command['type'] == 'remove':
+            num_to_remove = command['increment']
+            try:
+                for i in range(num_to_remove):
+                    if self._packerq.num_sub > command['min']:
+                        self._packerq.remove_packer_boss()
+            except:
+                self.logger.exception("Error on removing packer")
+                raise
+
+    def _lb_retriever(self, command):
+        """
+        Load Balance on Retriever
+        """
+        if command['type'] == 'add':
+            self._retrieverq.add_retriever(num=command['increment'])
+        if command['type'] == 'remove':
+            num_to_remove = command['increment']
+            try:
+                for i in range(num_to_remove):
+                    if self._retrieverq.num_sub > command['min']:
+                        self._retrieverq.remove_retriever()
+            except:
+                self.logger.exception("Error on removing retriever")
+                raise
+
 
     def _generate_heartbeat_message(self):
         """
