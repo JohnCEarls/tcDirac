@@ -253,7 +253,7 @@ class PosterQueue:
         self.logger.info("removing poster")
         self._reaper[-1].set()
         ctr = 0
-        while self._posters[-1].is_alive() and ctr < 10:
+        while self._posters[-1].is_alive() and ctr < 20:
             time.sleep(.2)
             ctr += 1
         if self._posters[-1].is_alive():

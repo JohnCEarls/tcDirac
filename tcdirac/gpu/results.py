@@ -99,7 +99,7 @@ class PackerQueue:
         if len(self._bosses) <=0:
             raise Exception("Attempt to remove Loader from empty LoaderQueue")
         temp = self._bosses[-1]
-        temp.kill_all()
+        temp.kill()
         self._bosses = self._bosses[:-1]
         self._bosses_skip = self._bosses_skip[:-1]
         self._curr = self._curr%len(self._bosses)

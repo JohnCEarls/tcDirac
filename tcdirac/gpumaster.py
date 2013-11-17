@@ -230,10 +230,8 @@ class Dirac:
             self._soft_kill_retriever()
             self._terminating = 1
         if command['message-type'] == 'load-balance':
+            self.logger.info(str(command))
             self._handle_load_balance(command)
-            #master says we are inefficient
-            #TODO
-            raise Exception("Unimplemented")
 
     def _handle_load_balance(self, command):
         """
@@ -247,12 +245,16 @@ class Dirac:
         """
 
         if command['process'] == 'loader':
-            self._loaderq(command)
+            self.logger.info("load balancing loader")
+            self._lb_loader(command)
         if command['process'] == 'poster':
+            self.logger.info("load balancing poster")
             self._lb_poster(command)
         if command['process'] == 'packer':
+            self.logger.info("load balancing packer")
             self._lb_packer(command)
         if command['process'] == 'retriever':
+            self.logger.info("load balancing retriever")
             self._lb_retriever(command)
 
     def _lb_loader(self, command):
@@ -265,7 +267,7 @@ class Dirac:
             num_to_remove = command['increment']
             try:
                 for i in range(num_to_remove):
-                    if self._loaderq.num_sub > command['min']:
+                    if self._loaderq.num_sub() > command['min']:
                         self._loaderq.remove_loader_boss()
             except:
                 self.logger.exception("Error on removing loader")
@@ -609,6 +611,9 @@ def mockMaster( master_q = 'tcdirac-master'):
         cq.write(m)
 
         time.sleep(10)
+
+        for m in get_lb_messages():
+            cq.write(Message(body=json.dumps(m)))
         print "MM: Sending terminate signal"
         cq.write( Message(body=get_terminate_message()))
     except:
@@ -616,6 +621,18 @@ def mockMaster( master_q = 'tcdirac-master'):
         print "Error in mockMaster"
         print "*"*30
         raise
+def get_lb_messages():
+    mess = []
+    for p in ['loader','poster','packer', 'retriever']:
+        for t in ['add','remove']:
+            command = {}
+            command['message-type'] = 'load-balance'
+            command['process'] = p 
+            command['type'] = t
+            command['increment'] = 3
+            command['min'] = 2
+            mess.append(command)
+    return mess
 
 def get_gpu_message():
     parsed = {}
@@ -638,7 +655,7 @@ def get_gpu_message():
     parsed['pairs-block-size'] = 16
     parsed['nets-block-size'] = 8
     
-    parsed['heartbeat-interval'] = 3
+    parsed['heartbeat-interval'] = 1
     return json.dumps(parsed)
 
 def get_terminate_message():
