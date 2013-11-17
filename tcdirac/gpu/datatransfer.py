@@ -114,6 +114,20 @@ class RetrieverQueue:
             self._retrievers[-1].start()
             self.add_retriever(num - 1)
 
+    def remove_retriever(self):
+        if len(self._retrievers) == 0:
+            raise Exception("Attempt to remove retriever from empty queue")
+        self.logger.info("removing retriever")
+        self._reaper[-1].set()
+        ctr = 0
+        while self._retrievers[-1].is_alive() and ctr < 10:
+            time.sleep(.2)
+            ctr += 1
+        if self._retrievers[-1].is_alive():
+            self._retrievers[-1].terminate()
+        self._reaper = self._reaper[:-1]
+        self._retrievers = self._retrievers[:-1]
+
 
     def repair(self):
         for i, d in enumerate(self._reaper):
@@ -220,6 +234,7 @@ class PosterQueue:
         self._reaper = []
 
     def add_poster(self, num=1):
+
         if num <= 0:
             return
         else:
@@ -230,6 +245,23 @@ class PosterQueue:
             self._posters[-1].daemon = True
             self._posters[-1].start()
             self.add_poster(num - 1)
+            
+
+    def remove_poster(self):
+        if len(self._posters) == 0:
+            raise Exception("Attempt to remove poster from empty queue")
+        self.logger.info("removing poster")
+        self._reaper[-1].set()
+        ctr = 0
+        while self._posters[-1].is_alive() and ctr < 10:
+            time.sleep(.2)
+            ctr += 1
+        if self._posters[-1].is_alive():
+            self._posters[-1].terminate()
+        self._reaper = self._reaper[:-1]
+        self._posters = self._posters[:-1]
+
+
 
 
     def repair(self):
